@@ -1,0 +1,66 @@
+image:
+  repository: docker.n8n.io/n8nio/n8n
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  type: ClusterIP
+  port: 5678
+
+ingress:
+  enabled: true
+  className: nginx
+  host: n8n.lrproduhub.com   # <— set your FQDN here
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "20m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+  tls:
+    enabled: true
+    secretName: n8n-tls      # provide via cert-manager or precreate; or set enabled: false
+
+persistence:
+  enabled: true
+  size: 10Gi
+  storageClass: ""           # leave empty to use default
+  accessModes: ["ReadWriteOnce"]
+
+# non-sensitive env
+env:
+  N8N_HOST: "n8n.lrproduhub.com"
+  N8N_PROTOCOL: "https"      # if using Ingress+TLS
+  N8N_PORT: "5678"
+  N8N_RUNNERS_ENABLED: "true"
+  GENERIC_TIMEZONE: "America/Bahia"
+  TZ: "America/Bahia"
+  # If using Ingress/reverse-proxy, set WEBHOOK_URL and PROXY_HOPS:
+  WEBHOOK_URL: "https://n8n.lrproduhub.com/"
+  N8N_PROXY_HOPS: "1"
+
+# secrets as plain strings (they will be templated into a Kubernetes Secret)
+envSecrets:
+  N8N_ENCRYPTION_KEY: "<64-hex-from-openssl-rand-hex-32>"
+  # Optional Postgres (recommended for scaling). If omitted, SQLite + PVC is used.
+  # DB_TYPE: "postgresdb"
+  # DB_POSTGRESDB_HOST: "<rds-endpoint>"
+  # DB_POSTGRESDB_PORT: "5432"
+  # DB_POSTGRESDB_DATABASE: "n8n"
+  # DB_POSTGRESDB_USER: "n8nuser"
+  # DB_POSTGRESDB_PASSWORD: "<password>"
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "256Mi"
+  limits:
+    cpu: "1"
+    memory: "1Gi"
+
+securityContext:
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
