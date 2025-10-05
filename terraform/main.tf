@@ -78,6 +78,7 @@ locals {
     var.n8n_webhook_url,
     format("%s://%s/", local.n8n_protocol, local.n8n_host)
   )
+  # Environment variables for n8n (used by setup.py when deploying via helm)
   n8n_env = merge({
     N8N_HOST         = local.n8n_host
     N8N_PROTOCOL     = local.n8n_protocol
@@ -86,39 +87,6 @@ locals {
     N8N_PROXY_HOPS   = tostring(var.n8n_proxy_hops)
     GENERIC_TIMEZONE = var.timezone
   }, var.n8n_env_overrides)
-
-  # Determine TLS annotations based on certificate source
-  tls_annotations = var.tls_certificate_source == "letsencrypt" ? merge(
-    var.n8n_ingress_annotations,
-    {
-      "cert-manager.io/cluster-issuer" = "letsencrypt-${var.letsencrypt_environment}"
-    }
-  ) : var.n8n_ingress_annotations
-
-  n8n_values_override = {
-    replicaCount = 1
-    service = {
-      type = var.n8n_service_type
-      port = var.n8n_service_port
-    }
-    ingress = {
-      enabled     = var.n8n_ingress_enabled
-      className   = var.n8n_ingress_class
-      host        = local.n8n_host
-      annotations = local.tls_annotations
-      tls = {
-        enabled    = var.tls_certificate_source != "none"
-        secretName = var.n8n_tls_secret_name
-      }
-    }
-    persistence = {
-      enabled      = var.n8n_persistence_enabled
-      size         = var.n8n_persistence_size
-      storageClass = var.n8n_persistence_storage_class
-      accessModes  = var.n8n_persistence_access_modes
-    }
-    env = local.n8n_env
-  }
 }
 
 ########################################
@@ -534,108 +502,8 @@ resource "helm_release" "nginx_ingress" {
 }
 
 ########################################
-# cert-manager (for Let's Encrypt)
+# Note: n8n application deployment is handled by setup.py
+# using helm CLI after infrastructure is ready and LoadBalancer
+# endpoint is available. This allows proper TLS configuration
+# after DNS has been set up.
 ########################################
-resource "helm_release" "cert_manager" {
-  count = var.enable_cert_manager ? 1 : 0
-
-  name             = "cert-manager"
-  repository       = "https://charts.jetstack.io"
-  chart            = "cert-manager"
-  namespace        = "cert-manager"
-  version          = var.cert_manager_version
-  create_namespace = true
-
-  set {
-    name  = "installCRDs"
-    value = "true"
-  }
-
-  depends_on = [
-    aws_eks_node_group.main,
-    aws_eks_addon.ebs_csi,
-  ]
-}
-
-# ClusterIssuer for Let's Encrypt
-resource "kubernetes_manifest" "letsencrypt_issuer" {
-  count = var.tls_certificate_source == "letsencrypt" ? 1 : 0
-
-  manifest = {
-    apiVersion = "cert-manager.io/v1"
-    kind       = "ClusterIssuer"
-    metadata = {
-      name = "letsencrypt-${var.letsencrypt_environment}"
-    }
-    spec = {
-      acme = {
-        server = var.letsencrypt_environment == "production" ? "https://acme-v02.api.letsencrypt.org/directory" : "https://acme-staging-v02.api.letsencrypt.org/directory"
-        email  = var.letsencrypt_email
-        privateKeySecretRef = {
-          name = "letsencrypt-${var.letsencrypt_environment}"
-        }
-        solvers = [
-          {
-            http01 = {
-              ingress = {
-                class = var.n8n_ingress_class
-              }
-            }
-          }
-        ]
-      }
-    }
-  }
-
-  depends_on = [helm_release.cert_manager]
-}
-
-# TLS Secret for BYO certificates
-resource "kubernetes_secret" "tls_certificate" {
-  count = var.tls_certificate_source == "byo" ? 1 : 0
-
-  metadata {
-    name      = var.n8n_tls_secret_name
-    namespace = var.n8n_namespace
-  }
-
-  type = "kubernetes.io/tls"
-
-  data = {
-    "tls.crt" = base64encode(var.tls_certificate_crt)
-    "tls.key" = base64encode(var.tls_certificate_key)
-  }
-
-  depends_on = [aws_eks_cluster.main]
-}
-
-########################################
-# n8n Helm deployment
-########################################
-resource "helm_release" "n8n" {
-  name             = "n8n"
-  chart            = "${path.module}/../helm"
-  namespace        = var.n8n_namespace
-  create_namespace = true
-
-  values = [
-    file("${path.module}/../helm/values.yaml"),
-    yamlencode(local.n8n_values_override),
-  ]
-
-  set_sensitive {
-    name  = "envSecrets.N8N_ENCRYPTION_KEY"
-    value = data.aws_ssm_parameter.n8n_encryption_key.value
-  }
-
-  depends_on = [
-    aws_eks_node_group.main,
-    aws_eks_addon.ebs_csi,
-    aws_ssm_parameter.n8n_encryption_key,
-    kubernetes_storage_class.ebs_gp3,
-    helm_release.nginx_ingress,
-    helm_release.cert_manager,
-    kubernetes_secret.tls_certificate,
-    kubernetes_manifest.letsencrypt_issuer,
-  ]
-}
