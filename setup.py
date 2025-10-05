@@ -677,44 +677,371 @@ class HelmRunner:
     def __init__(self, helm_dir: Path):
         self.helm_dir = helm_dir
 
-    def run_command(self, args: list) -> Tuple[bool, str]:
+    def run_command(self, args: list, interactive: bool = False) -> Tuple[bool, str]:
         """Run a helm command"""
         cmd = ['helm'] + args
 
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=300
-            )
-            return result.returncode == 0, result.stdout + result.stderr
+            if interactive:
+                result = subprocess.run(cmd, text=True)
+                return result.returncode == 0, ""
+            else:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=300
+                )
+                return result.returncode == 0, result.stdout + result.stderr
         except subprocess.TimeoutExpired:
             return False, "Command timed out"
         except Exception as e:
             return False, str(e)
 
-    def install(self, release_name: str = "n8n", namespace: str = "default") -> bool:
-        """Install Helm chart"""
-        print(f"\n{Colors.HEADER}🎯 Installing Helm chart...{Colors.ENDC}")
+    def deploy_n8n(self, config: DeploymentConfig, encryption_key: str, namespace: str = "n8n", tls_enabled: bool = False) -> bool:
+        """Deploy n8n via Helm without TLS initially"""
+        print(f"\n{Colors.HEADER}🎯 Deploying n8n application...{Colors.ENDC}")
 
-        success, output = self.run_command([
-            'install', release_name, str(self.helm_dir),
+        # Build helm values
+        values_args = [
+            'install', 'n8n', str(self.helm_dir),
             '--namespace', namespace,
-            '--create-namespace'
-        ])
+            '--create-namespace',
+            '--set', f'ingress.enabled=true',
+            '--set', f'ingress.className=nginx',
+            '--set', f'ingress.host={config.n8n_host}',
+            '--set', f'ingress.tls.enabled={str(tls_enabled).lower()}',
+            '--set', f'env.N8N_HOST={config.n8n_host}',
+            '--set', f'env.N8N_PROTOCOL={"https" if tls_enabled else "http"}',
+            '--set', f'env.GENERIC_TIMEZONE={config.timezone}',
+            '--set', f'env.TZ={config.timezone}',
+            '--set-string', f'envSecrets.N8N_ENCRYPTION_KEY={encryption_key}',
+        ]
+
+        success, output = self.run_command(values_args)
 
         if success:
-            print(f"{Colors.OKGREEN}✓ Helm chart installed{Colors.ENDC}")
-            print(output)
+            print(f"{Colors.OKGREEN}✓ n8n deployed successfully{Colors.ENDC}")
         else:
-            print(f"{Colors.FAIL}✗ Helm install failed{Colors.ENDC}")
+            print(f"{Colors.FAIL}✗ n8n deployment failed{Colors.ENDC}")
             print(output)
 
         return success
 
+    def upgrade_n8n_with_tls(self, config: DeploymentConfig, encryption_key: str, namespace: str = "n8n",
+                             cert_manager_annotation: str = None) -> bool:
+        """Upgrade n8n Helm release to enable TLS"""
+        print(f"\n{Colors.HEADER}🔒 Upgrading n8n with TLS enabled...{Colors.ENDC}")
+
+        values_args = [
+            'upgrade', 'n8n', str(self.helm_dir),
+            '--namespace', namespace,
+            '--reuse-values',
+            '--set', 'ingress.tls.enabled=true',
+            '--set', f'env.N8N_PROTOCOL=https',
+        ]
+
+        # Add cert-manager annotation if using Let's Encrypt
+        if cert_manager_annotation:
+            values_args.extend([
+                '--set', f'ingress.annotations.cert-manager\\.io/cluster-issuer={cert_manager_annotation}'
+            ])
+
+        success, output = self.run_command(values_args)
+
+        if success:
+            print(f"{Colors.OKGREEN}✓ n8n upgraded with TLS{Colors.ENDC}")
+        else:
+            print(f"{Colors.FAIL}✗ n8n TLS upgrade failed{Colors.ENDC}")
+            print(output)
+
+        return success
+
+def get_loadbalancer_url(max_attempts: int = 30, delay: int = 10) -> Optional[str]:
+    """Get the LoadBalancer URL from NGINX ingress controller
+
+    Args:
+        max_attempts: Maximum number of attempts to get the URL
+        delay: Delay in seconds between attempts
+
+    Returns:
+        LoadBalancer DNS name or None if not found
+    """
+    print(f"\n{Colors.HEADER}⏳ Waiting for LoadBalancer to be ready...{Colors.ENDC}")
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result = subprocess.run(
+                ['kubectl', 'get', 'svc', '-n', 'ingress-nginx', 'ingress-nginx-controller',
+                 '-o', 'jsonpath={.status.loadBalancer.ingress[0].hostname}'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            if result.returncode == 0 and result.stdout.strip():
+                lb_url = result.stdout.strip()
+                print(f"{Colors.OKGREEN}✓ LoadBalancer ready: {lb_url}{Colors.ENDC}")
+                return lb_url
+
+            print(f"  Attempt {attempt}/{max_attempts} - LoadBalancer not ready yet...")
+            if attempt < max_attempts:
+                import time
+                time.sleep(delay)
+
+        except Exception as e:
+            print(f"{Colors.WARNING}Error checking LoadBalancer: {e}{Colors.ENDC}")
+            if attempt < max_attempts:
+                import time
+                time.sleep(delay)
+
+    print(f"{Colors.FAIL}✗ LoadBalancer not ready after {max_attempts * delay} seconds{Colors.ENDC}")
+    return None
+
+def configure_tls_interactive(config: DeploymentConfig, script_dir: Path, loadbalancer_url: str) -> bool:
+    """Interactive TLS configuration after deployment
+
+    Args:
+        config: Deployment configuration
+        script_dir: Script directory path
+        loadbalancer_url: LoadBalancer DNS name
+
+    Returns:
+        True if TLS was configured successfully
+    """
+    print(f"\n{Colors.HEADER}{Colors.BOLD}TLS/HTTPS Configuration{Colors.ENDC}")
+    print("=" * 60)
+    print("Your n8n is currently accessible via HTTP (unencrypted)")
+    print(f"LoadBalancer URL: {Colors.OKCYAN}{loadbalancer_url}{Colors.ENDC}")
+    print()
+
+    prompt = ConfigurationPrompt()
+
+    if not prompt.prompt_yes_no("Would you like to configure TLS/HTTPS now?", default=False):
+        print(f"\n{Colors.WARNING}TLS configuration skipped{Colors.ENDC}")
+        print("You can configure TLS later by running:")
+        print(f"  {Colors.OKCYAN}python3 setup.py --configure-tls{Colors.ENDC}")
+        return False
+
+    # TLS Configuration prompts
+    print(f"\n{Colors.BOLD}Choose TLS certificate option:{Colors.ENDC}")
+
+    tls_choice = prompt.prompt_choice(
+        "TLS Configuration",
+        [
+            "Bring Your Own Certificate (provide PEM files)",
+            "Let's Encrypt (auto-generated, HTTP-01 validation)"
+        ],
+        default=1
+    )
+
+    if "Bring Your Own" in tls_choice:
+        config.tls_certificate_source = "byo"
+
+        # Get certificate file
+        while True:
+            cert_path = prompt.prompt(
+                "Path to TLS certificate file (PEM format)",
+                required=True
+            )
+            valid, content = CertificateValidator.validate_pem_file(cert_path, "certificate")
+            if valid:
+                config.tls_certificate_crt = content
+                print(f"{Colors.OKGREEN}✓ Certificate validated{Colors.ENDC}")
+                break
+            else:
+                print(f"{Colors.FAIL}✗ {content}{Colors.ENDC}")
+
+        # Get private key file
+        while True:
+            key_path = prompt.prompt(
+                "Path to TLS private key file (PEM format)",
+                required=True
+            )
+            valid, content = CertificateValidator.validate_pem_file(key_path, "key")
+            if valid:
+                config.tls_certificate_key = content
+                print(f"{Colors.OKGREEN}✓ Private key validated{Colors.ENDC}")
+                break
+            else:
+                print(f"{Colors.FAIL}✗ {content}{Colors.ENDC}")
+
+        # Create TLS secret
+        print(f"\n{Colors.HEADER}Creating TLS secret...{Colors.ENDC}")
+        try:
+            # Create temporary files for cert and key
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.crt', delete=False) as cert_file:
+                cert_file.write(config.tls_certificate_crt)
+                cert_path = cert_file.name
+
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.key', delete=False) as key_file:
+                key_file.write(config.tls_certificate_key)
+                key_path = key_file.name
+
+            result = subprocess.run([
+                'kubectl', 'create', 'secret', 'tls', 'n8n-tls',
+                '-n', 'n8n',
+                f'--cert={cert_path}',
+                f'--key={key_path}'
+            ], capture_output=True, text=True)
+
+            # Clean up temp files
+            os.unlink(cert_path)
+            os.unlink(key_path)
+
+            if result.returncode == 0:
+                print(f"{Colors.OKGREEN}✓ TLS secret created{Colors.ENDC}")
+            else:
+                print(f"{Colors.FAIL}✗ Failed to create TLS secret{Colors.ENDC}")
+                print(result.stderr)
+                return False
+
+        except Exception as e:
+            print(f"{Colors.FAIL}✗ Error creating TLS secret: {e}{Colors.ENDC}")
+            return False
+
+    elif "Let's Encrypt" in tls_choice:
+        config.tls_certificate_source = "letsencrypt"
+
+        # Get email for Let's Encrypt
+        while True:
+            email = prompt.prompt(
+                "Email address for Let's Encrypt notifications",
+                required=True
+            )
+            if CertificateValidator.validate_email(email):
+                config.letsencrypt_email = email
+                print(f"{Colors.OKGREEN}✓ Email validated{Colors.ENDC}")
+                break
+            else:
+                print(f"{Colors.FAIL}✗ Invalid email format{Colors.ENDC}")
+
+        # Ask about staging vs production
+        use_staging = prompt.prompt_yes_no(
+            "Use Let's Encrypt staging environment? (recommended for testing)",
+            default=False
+        )
+        config.letsencrypt_environment = "staging" if use_staging else "production"
+
+        # Show DNS configuration instructions
+        print(f"\n{Colors.WARNING}{Colors.BOLD}⚠️  IMPORTANT - DNS Configuration Required{Colors.ENDC}")
+        print("=" * 60)
+        print(f"Before proceeding, you MUST configure DNS:")
+        print(f"\n1. Create a DNS record for: {Colors.OKCYAN}{config.n8n_host}{Colors.ENDC}")
+        print(f"2. Point it to LoadBalancer: {Colors.OKCYAN}{loadbalancer_url}{Colors.ENDC}")
+        print(f"\n   Record Type: {Colors.BOLD}CNAME{Colors.ENDC}")
+        print(f"   Name: {Colors.OKCYAN}{config.n8n_host}{Colors.ENDC}")
+        print(f"   Value: {Colors.OKCYAN}{loadbalancer_url}{Colors.ENDC}")
+        print(f"\n   OR use an {Colors.BOLD}A record (ALIAS){Colors.ENDC} if your DNS provider supports it")
+        print("=" * 60)
+
+        if not prompt.prompt_yes_no("\nHave you configured the DNS record?", default=False):
+            print(f"\n{Colors.WARNING}TLS configuration cancelled{Colors.ENDC}")
+            print("Configure DNS and run setup with --configure-tls when ready")
+            return False
+
+        # Install cert-manager
+        print(f"\n{Colors.HEADER}Installing cert-manager...{Colors.ENDC}")
+        try:
+            result = subprocess.run([
+                'helm', 'install', 'cert-manager', 'https://charts.jetstack.io/charts/cert-manager-v1.13.3.tgz',
+                '--namespace', 'cert-manager',
+                '--create-namespace',
+                '--set', 'installCRDs=true'
+            ], capture_output=True, text=True, timeout=180)
+
+            if result.returncode == 0:
+                print(f"{Colors.OKGREEN}✓ cert-manager installed{Colors.ENDC}")
+            else:
+                print(f"{Colors.FAIL}✗ cert-manager installation failed{Colors.ENDC}")
+                print(result.stderr)
+                return False
+
+        except Exception as e:
+            print(f"{Colors.FAIL}✗ Error installing cert-manager: {e}{Colors.ENDC}")
+            return False
+
+        # Create ClusterIssuer
+        print(f"\n{Colors.HEADER}Creating Let's Encrypt ClusterIssuer...{Colors.ENDC}")
+        issuer_name = f"letsencrypt-{config.letsencrypt_environment}"
+        issuer_yaml = f"""apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {issuer_name}
+spec:
+  acme:
+    server: {"https://acme-v02.api.letsencrypt.org/directory" if config.letsencrypt_environment == "production" else "https://acme-staging-v02.api.letsencrypt.org/directory"}
+    email: {config.letsencrypt_email}
+    privateKeySecretRef:
+      name: {issuer_name}
+    solvers:
+    - http01:
+        ingress:
+          class: nginx
+"""
+
+        try:
+            result = subprocess.run(
+                ['kubectl', 'apply', '-f', '-'],
+                input=issuer_yaml,
+                capture_output=True,
+                text=True
+            )
+
+            if result.returncode == 0:
+                print(f"{Colors.OKGREEN}✓ ClusterIssuer created{Colors.ENDC}")
+            else:
+                print(f"{Colors.FAIL}✗ Failed to create ClusterIssuer{Colors.ENDC}")
+                print(result.stderr)
+                return False
+
+        except Exception as e:
+            print(f"{Colors.FAIL}✗ Error creating ClusterIssuer: {e}{Colors.ENDC}")
+            return False
+
+    # Upgrade n8n with TLS
+    helm_runner = HelmRunner(script_dir / "helm")
+
+    # Get encryption key from outputs
+    tf_runner = TerraformRunner(script_dir / "terraform")
+    outputs = tf_runner.get_outputs()
+    encryption_key = outputs.get('n8n_encryption_key_value', '')
+
+    cert_manager_annotation = None
+    if config.tls_certificate_source == "letsencrypt":
+        cert_manager_annotation = f"letsencrypt-{config.letsencrypt_environment}"
+
+    if helm_runner.upgrade_n8n_with_tls(config, encryption_key, "n8n", cert_manager_annotation):
+        print(f"\n{Colors.OKGREEN}{Colors.BOLD}✅ TLS Configuration Complete!{Colors.ENDC}")
+
+        if config.tls_certificate_source == "letsencrypt":
+            print("\n" + "=" * 60)
+            print(f"{Colors.BOLD}Let's Encrypt Certificate Issuance{Colors.ENDC}")
+            print("=" * 60)
+            print("Certificate issuance typically takes 2-5 minutes")
+            print("\nMonitor certificate status:")
+            print(f"  {Colors.OKCYAN}kubectl get certificate -n n8n{Colors.ENDC}")
+            print(f"  {Colors.OKCYAN}kubectl describe certificate n8n-tls -n n8n{Colors.ENDC}")
+            print("\nOnce ready, access n8n at:")
+            print(f"  {Colors.OKGREEN}https://{config.n8n_host}{Colors.ENDC}")
+            print("=" * 60)
+        else:
+            print(f"\nAccess n8n at: {Colors.OKGREEN}https://{config.n8n_host}{Colors.ENDC}")
+
+        return True
+    else:
+        print(f"\n{Colors.FAIL}TLS configuration failed{Colors.ENDC}")
+        return False
+
 def main():
-    """Main execution flow for N8N EKS deployment"""
+    """Main execution flow for N8N EKS deployment - 4 Phase Deployment"""
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='N8N EKS Deployment Setup')
+    parser.add_argument('--configure-tls', action='store_true',
+                       help='Configure TLS for existing n8n deployment')
+    args = parser.parse_args()
+
     script_dir = Path(__file__).parent
 
     print(f"{Colors.BOLD}{Colors.HEADER}")
@@ -729,27 +1056,26 @@ def main():
         if not deps_ok:
             sys.exit(1)
 
-        # Collect configuration
+        # Collect configuration (skip TLS - will be configured after LoadBalancer is ready)
         print(f"\n{Colors.HEADER}Let's configure your EKS deployment...{Colors.ENDC}")
         prompt = ConfigurationPrompt()
-        config = prompt.collect_configuration()
+        config = prompt.collect_configuration(skip_tls=True)
 
         # Update configuration files
         updater = FileUpdater(script_dir)
         updater.apply_configuration(config)
 
-        # EKS deployment: Terraform handles everything (cluster + n8n via Helm)
-        print(f"\n{Colors.HEADER}🚀 Starting EKS deployment...{Colors.ENDC}")
-        print("This will:")
-        print("  1. Create VPC, subnets, and networking (~5 minutes)")
-        print("  2. Create EKS cluster and node group (~15-20 minutes)")
-        print("  3. Deploy NGINX ingress controller (~2 minutes)")
-        if config.tls_certificate_source == "letsencrypt":
-            print("  4. Install cert-manager for Let's Encrypt (~2 minutes)")
-            print("  5. Deploy n8n with automatic TLS certificate (~3 minutes)")
-        else:
-            print("  4. Deploy n8n via Helm (~2 minutes)")
-        print(f"\n{Colors.WARNING}Total estimated time: ~25-30 minutes{Colors.ENDC}")
+        # ═══════════════════════════════════════════════════════════════
+        # PHASE 1: Deploy Infrastructure (Terraform)
+        # ═══════════════════════════════════════════════════════════════
+        print(f"\n{Colors.HEADER}{Colors.BOLD}📦 PHASE 1: Deploying Infrastructure{Colors.ENDC}")
+        print("=" * 60)
+        print("This will create:")
+        print("  • VPC, subnets, NAT gateways (~5 minutes)")
+        print("  • EKS cluster and node group (~15-20 minutes)")
+        print("  • NGINX ingress controller with LoadBalancer (~2 minutes)")
+        print("  • EBS CSI driver and StorageClass")
+        print(f"\n{Colors.WARNING}⏱  Estimated time: ~22-27 minutes{Colors.ENDC}\n")
 
         tf_runner = TerraformRunner(script_dir / "terraform")
 
@@ -761,6 +1087,8 @@ def main():
 
         if not tf_runner.apply():
             raise Exception("Terraform apply failed")
+
+        print(f"\n{Colors.OKGREEN}✓ Infrastructure deployed successfully{Colors.ENDC}")
 
         # Get outputs
         outputs = tf_runner.get_outputs()
@@ -774,25 +1102,69 @@ def main():
             if result.returncode == 0:
                 print(f"{Colors.OKGREEN}✓ kubectl configured{Colors.ENDC}")
             else:
-                print(f"{Colors.WARNING}⚠ kubectl configuration failed. Run manually:{Colors.ENDC}")
+                print(f"{Colors.WARNING}⚠  kubectl configuration failed. Run manually:{Colors.ENDC}")
                 print(f"  {Colors.OKCYAN}{kubectl_cmd}{Colors.ENDC}")
+                raise Exception("kubectl configuration required")
 
-        # Display success and access instructions
-        print(f"\n{Colors.OKGREEN}{Colors.BOLD}🎉 EKS Deployment Complete!{Colors.ENDC}")
+        # ═══════════════════════════════════════════════════════════════
+        # PHASE 2: Deploy n8n Application (Helm)
+        # ═══════════════════════════════════════════════════════════════
+        print(f"\n{Colors.HEADER}{Colors.BOLD}🚀 PHASE 2: Deploying n8n Application{Colors.ENDC}")
         print("=" * 60)
 
-        # Show access instructions from Terraform output
-        if 'access_instructions' in outputs:
-            print(f"\n{outputs['access_instructions']}")
+        helm_runner = HelmRunner(script_dir / "helm")
+        encryption_key = outputs.get('n8n_encryption_key_value', '')
+
+        if not encryption_key:
+            raise Exception("Failed to retrieve encryption key from Terraform outputs")
+
+        # Deploy n8n without TLS initially
+        if not helm_runner.deploy_n8n(config, encryption_key, namespace="n8n", tls_enabled=False):
+            raise Exception("n8n deployment failed")
+
+        print(f"\n{Colors.OKGREEN}✓ n8n application deployed{Colors.ENDC}")
+
+        # ═══════════════════════════════════════════════════════════════
+        # PHASE 3: Get LoadBalancer URL
+        # ═══════════════════════════════════════════════════════════════
+        print(f"\n{Colors.HEADER}{Colors.BOLD}🌐 PHASE 3: Retrieving LoadBalancer URL{Colors.ENDC}")
+        print("=" * 60)
+
+        loadbalancer_url = get_loadbalancer_url(max_attempts=30, delay=10)
+
+        if not loadbalancer_url:
+            print(f"\n{Colors.WARNING}⚠  LoadBalancer URL not available yet{Colors.ENDC}")
+            print("Try retrieving it manually with:")
+            print(f"  {Colors.OKCYAN}kubectl get svc -n ingress-nginx ingress-nginx-controller{Colors.ENDC}")
+            loadbalancer_url = "<pending>"
+
+        # ═══════════════════════════════════════════════════════════════
+        # DEPLOYMENT COMPLETE - Show Access Information
+        # ═══════════════════════════════════════════════════════════════
+        print(f"\n{Colors.OKGREEN}{Colors.BOLD}{'=' * 60}{Colors.ENDC}")
+        print(f"{Colors.OKGREEN}{Colors.BOLD}  🎉 N8N DEPLOYMENT COMPLETE!{Colors.ENDC}")
+        print(f"{Colors.OKGREEN}{Colors.BOLD}{'=' * 60}{Colors.ENDC}\n")
+
+        print(f"{Colors.BOLD}Your n8n instance is now running!{Colors.ENDC}\n")
+        print(f"LoadBalancer URL: {Colors.OKCYAN}{loadbalancer_url}{Colors.ENDC}")
+        print(f"Access n8n at:    {Colors.OKCYAN}http://{loadbalancer_url}{Colors.ENDC}")
+        print(f"\n{Colors.WARNING}⚠  Currently using HTTP (unencrypted){Colors.ENDC}\n")
+
+        # ═══════════════════════════════════════════════════════════════
+        # PHASE 4: TLS Configuration (Optional)
+        # ═══════════════════════════════════════════════════════════════
+        if loadbalancer_url != "<pending>":
+            configure_tls_interactive(config, script_dir, loadbalancer_url)
 
         # Show useful kubectl commands
-        n8n_namespace = outputs.get('n8n_namespace', 'n8n')
         print(f"\n{Colors.BOLD}Useful Commands:{Colors.ENDC}")
-        print(f"  {Colors.OKCYAN}kubectl get pods -n {n8n_namespace}{Colors.ENDC}")
-        print(f"  {Colors.OKCYAN}kubectl get ingress -n {n8n_namespace}{Colors.ENDC}")
+        print(f"  {Colors.OKCYAN}kubectl get pods -n n8n{Colors.ENDC}")
+        print(f"  {Colors.OKCYAN}kubectl get ingress -n n8n{Colors.ENDC}")
+        print(f"  {Colors.OKCYAN}kubectl logs -f deployment/n8n -n n8n{Colors.ENDC}")
         print(f"  {Colors.OKCYAN}kubectl get svc -n ingress-nginx{Colors.ENDC}")
-        if config.tls_certificate_source == "letsencrypt":
-            print(f"  {Colors.OKCYAN}kubectl get certificate -n {n8n_namespace}{Colors.ENDC}")
+
+        if config.tls_certificate_source in ["byo", "letsencrypt"]:
+            print(f"  {Colors.OKCYAN}kubectl get certificate -n n8n{Colors.ENDC}")
 
         print("\n" + "=" * 60)
 
