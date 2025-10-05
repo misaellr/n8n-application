@@ -12,42 +12,45 @@ service:
 ingress:
   enabled: true
   className: nginx
-  host: n8n.lrproduhub.com   # <— set your FQDN here
+  host: n8n.example.com
   annotations:
     nginx.ingress.kubernetes.io/proxy-body-size: "20m"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    # For Let's Encrypt, add:
+    # cert-manager.io/cluster-issuer: "letsencrypt-production"
   tls:
+    # Set to false for HTTP-only (no TLS)
+    # Set to true when using BYO certificate or Let's Encrypt
     enabled: true
-    secretName: n8n-tls      # provide via cert-manager or precreate; or set enabled: false
+    # Name of the Kubernetes TLS secret
+    # - For BYO: secret created by Terraform with user-provided cert
+    # - For Let's Encrypt: secret created by cert-manager automatically
+    secretName: n8n-tls
 
 persistence:
   enabled: true
   size: 10Gi
-  storageClass: ""           # leave empty to use default
-  accessModes: ["ReadWriteOnce"]
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
 
-# non-sensitive env
+# Non-sensitive environment variables
+# Note: When deployed via Terraform, many of these values are overridden
+# based on terraform.tfvars configuration (host, protocol, timezone, etc.)
 env:
-  N8N_HOST: "n8n.lrproduhub.com"
-  N8N_PROTOCOL: "https"      # if using Ingress+TLS
+  N8N_HOST: "n8n.example.com"
+  N8N_PROTOCOL: "https"  # Set to "http" when tls.enabled=false
   N8N_PORT: "5678"
   N8N_RUNNERS_ENABLED: "true"
   GENERIC_TIMEZONE: "America/Bahia"
   TZ: "America/Bahia"
-  # If using Ingress/reverse-proxy, set WEBHOOK_URL and PROXY_HOPS:
-  WEBHOOK_URL: "https://n8n.lrproduhub.com/"
+  WEBHOOK_URL: "https://n8n.example.com/"
   N8N_PROXY_HOPS: "1"
 
-# secrets as plain strings (they will be templated into a Kubernetes Secret)
-envSecrets:
-  N8N_ENCRYPTION_KEY: "<64-hex-from-openssl-rand-hex-32>"
-  # Optional Postgres (recommended for scaling). If omitted, SQLite + PVC is used.
-  # DB_TYPE: "postgresdb"
-  # DB_POSTGRESDB_HOST: "<rds-endpoint>"
-  # DB_POSTGRESDB_PORT: "5432"
-  # DB_POSTGRESDB_DATABASE: "n8n"
-  # DB_POSTGRESDB_USER: "n8nuser"
-  # DB_POSTGRESDB_PASSWORD: "<password>"
+# Sensitive environment variables (templated into a Kubernetes Secret)
+# Note: When deployed via Terraform, N8N_ENCRYPTION_KEY is automatically
+# set from AWS SSM Parameter Store (generated or user-provided)
+envSecrets: {}
 
 resources:
   requests:
@@ -70,3 +73,9 @@ hpa:
   minReplicas: 1
   maxReplicas: 3
   targetCPUUtilizationPercentage: 70
+
+# PodDisruptionBudget - only enable when running multiple replicas
+# to avoid blocking node drains with single replica
+pdb:
+  enabled: false
+  minAvailable: 1

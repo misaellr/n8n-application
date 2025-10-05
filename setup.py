@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-N8N Deployment Setup CLI
-Automates the setup and deployment of n8n using Terraform and Helm
+N8N EKS Deployment Setup CLI
+Automates the setup and deployment of n8n on AWS EKS using Terraform and Helm
 """
 
 import os
@@ -11,6 +11,7 @@ import subprocess
 import shutil
 import tempfile
 import secrets
+import argparse
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 import signal
@@ -32,30 +33,40 @@ class SetupInterrupted(Exception):
     pass
 
 class DeploymentConfig:
-    """Stores all configuration for the deployment"""
+    """Stores all configuration for the EKS deployment"""
     def __init__(self):
         self.aws_profile: Optional[str] = None
         self.aws_region: Optional[str] = None
-        self.instance_type: str = "t3.small"
-        self.domain: str = ""
+        self.cluster_name: str = "n8n-eks-cluster"
+        self.node_instance_types: list = ["t3.medium"]
+        self.node_desired_size: int = 1
+        self.n8n_host: str = ""
         self.timezone: str = "America/Bahia"
         self.n8n_encryption_key: str = ""
-        self.deployment_mode: str = "ec2"  # "ec2" or "eks"
-        self.n8n_host: str = ""
+
+        # TLS Configuration
+        self.tls_certificate_source: str = "none"  # "none", "byo", or "letsencrypt"
+        self.tls_certificate_crt: str = ""  # PEM content for BYO
+        self.tls_certificate_key: str = ""  # PEM content for BYO
+        self.letsencrypt_email: str = ""
+        self.letsencrypt_environment: str = "production"  # "staging" or "production"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             'aws_profile': self.aws_profile,
             'aws_region': self.aws_region,
-            'instance_type': self.instance_type,
-            'domain': self.domain,
-            'timezone': self.timezone,
-            'deployment_mode': self.deployment_mode,
+            'cluster_name': self.cluster_name,
+            'node_instance_types': self.node_instance_types,
+            'node_desired_size': self.node_desired_size,
             'n8n_host': self.n8n_host,
+            'timezone': self.timezone,
+            'tls_certificate_source': self.tls_certificate_source,
+            'letsencrypt_email': self.letsencrypt_email,
+            'letsencrypt_environment': self.letsencrypt_environment,
         }
 
 class DependencyChecker:
-    """Checks for required CLI tools"""
+    """Checks for required CLI tools for EKS deployment"""
 
     REQUIRED_TOOLS = {
         'terraform': {
@@ -67,19 +78,16 @@ class DependencyChecker:
             'command': 'aws --version',
             'install_url': 'https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html',
             'description': 'AWS Command Line Interface'
-        }
-    }
-
-    OPTIONAL_TOOLS = {
+        },
         'helm': {
             'command': 'helm version',
             'install_url': 'https://helm.sh/docs/intro/install/',
-            'description': 'Kubernetes package manager (required for EKS deployment)'
+            'description': 'Kubernetes package manager'
         },
         'kubectl': {
             'command': 'kubectl version --client',
             'install_url': 'https://kubernetes.io/docs/tasks/tools/',
-            'description': 'Kubernetes command-line tool (required for EKS deployment)'
+            'description': 'Kubernetes command-line tool'
         }
     }
 
@@ -89,28 +97,19 @@ class DependencyChecker:
         return shutil.which(tool_name) is not None
 
     @classmethod
-    def check_all_dependencies(cls, deployment_mode: str = "ec2") -> Tuple[bool, list]:
-        """Check all required dependencies"""
+    def check_all_dependencies(cls) -> Tuple[bool, list]:
+        """Check all required dependencies for EKS deployment"""
         missing = []
 
-        print(f"\n{Colors.HEADER}🔍 Checking dependencies...{Colors.ENDC}")
+        print(f"\n{Colors.HEADER}🔍 Checking dependencies for EKS deployment...{Colors.ENDC}")
 
-        # Check required tools
+        # Check all required tools
         for tool, info in cls.REQUIRED_TOOLS.items():
             if cls.check_tool(tool):
                 print(f"{Colors.OKGREEN}✓{Colors.ENDC} {tool} - installed")
             else:
                 print(f"{Colors.FAIL}✗{Colors.ENDC} {tool} - NOT installed")
                 missing.append((tool, info))
-
-        # Check optional tools based on deployment mode
-        if deployment_mode == "eks":
-            for tool, info in cls.OPTIONAL_TOOLS.items():
-                if cls.check_tool(tool):
-                    print(f"{Colors.OKGREEN}✓{Colors.ENDC} {tool} - installed")
-                else:
-                    print(f"{Colors.FAIL}✗{Colors.ENDC} {tool} - NOT installed")
-                    missing.append((tool, info))
 
         if missing:
             print(f"\n{Colors.WARNING}Missing dependencies detected!{Colors.ENDC}")
@@ -122,6 +121,50 @@ class DependencyChecker:
 
         print(f"\n{Colors.OKGREEN}✓ All dependencies satisfied{Colors.ENDC}")
         return True, []
+
+class CertificateValidator:
+    """Validates TLS certificates in PEM format"""
+
+    @staticmethod
+    def validate_pem_file(file_path: str, cert_type: str = "certificate") -> Tuple[bool, str]:
+        """Validate a PEM file and return its content"""
+        try:
+            path = Path(file_path).expanduser()
+            if not path.exists():
+                return False, f"File not found: {file_path}"
+
+            if not path.is_file():
+                return False, f"Not a file: {file_path}"
+
+            content = path.read_text()
+
+            # Basic PEM format validation
+            if cert_type == "certificate":
+                if "-----BEGIN CERTIFICATE-----" not in content:
+                    return False, "Not a valid PEM certificate (missing BEGIN CERTIFICATE)"
+                if "-----END CERTIFICATE-----" not in content:
+                    return False, "Not a valid PEM certificate (missing END CERTIFICATE)"
+            elif cert_type == "key":
+                # Support various private key formats
+                key_markers = [
+                    "-----BEGIN PRIVATE KEY-----",
+                    "-----BEGIN RSA PRIVATE KEY-----",
+                    "-----BEGIN EC PRIVATE KEY-----"
+                ]
+                if not any(marker in content for marker in key_markers):
+                    return False, "Not a valid PEM private key"
+
+            return True, content
+
+        except Exception as e:
+            return False, f"Error reading file: {str(e)}"
+
+    @staticmethod
+    def validate_email(email: str) -> bool:
+        """Simple email validation"""
+        import re
+        pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        return re.match(pattern, email) is not None
 
 class AWSAuthChecker:
     """Handles AWS authentication verification"""
@@ -254,16 +297,8 @@ class ConfigurationPrompt:
 
     def collect_configuration(self) -> DeploymentConfig:
         """Collect all configuration from user"""
-        print(f"\n{Colors.HEADER}{Colors.BOLD}N8N Deployment Configuration{Colors.ENDC}")
+        print(f"\n{Colors.HEADER}{Colors.BOLD}N8N EKS Deployment Configuration{Colors.ENDC}")
         print("=" * 60)
-
-        # Deployment mode
-        print(f"\n{Colors.BOLD}Deployment Mode{Colors.ENDC}")
-        self.config.deployment_mode = self.prompt_choice(
-            "How would you like to deploy n8n?",
-            ["EC2 (Simple, single instance)", "EKS (Kubernetes, scalable)"],
-            default=0
-        ).split()[0].lower()
 
         # AWS Configuration
         print(f"\n{Colors.BOLD}AWS Configuration{Colors.ENDC}")
@@ -315,31 +350,35 @@ class ConfigurationPrompt:
             print(f"  {Colors.OKCYAN}aws configure --profile {self.config.aws_profile}{Colors.ENDC}")
             raise SetupInterrupted("AWS authentication required")
 
-        # Instance Configuration (EC2 mode)
-        if self.config.deployment_mode == "ec2":
-            print(f"\n{Colors.BOLD}EC2 Instance Configuration{Colors.ENDC}")
-            instance_types = ["t3.micro", "t3.small", "t3.medium", "t3.large"]
-            print(f"\nRecommended instance types: {', '.join(instance_types)}")
-            self.config.instance_type = self.prompt(
-                "Instance Type",
-                default="t3.small"
-            )
+        # EKS Cluster Configuration
+        print(f"\n{Colors.BOLD}EKS Cluster Configuration{Colors.ENDC}")
+
+        self.config.cluster_name = self.prompt(
+            "EKS Cluster Name",
+            default="n8n-eks-cluster"
+        )
+
+        node_types = ["t3.small", "t3.medium", "t3.large"]
+        print(f"\nRecommended node types: {', '.join(node_types)}")
+        node_type = self.prompt(
+            "Node Instance Type",
+            default="t3.medium"
+        )
+        self.config.node_instance_types = [node_type]
+
+        self.config.node_desired_size = int(self.prompt(
+            "Desired number of nodes",
+            default="1"
+        ))
 
         # N8N Configuration
         print(f"\n{Colors.BOLD}N8N Configuration{Colors.ENDC}")
 
-        # Domain (optional)
-        self.config.domain = self.prompt(
-            "Domain name for n8n (leave empty for IP access)",
-            default=""
+        self.config.n8n_host = self.prompt(
+            "N8N Hostname (FQDN for ingress)",
+            default="n8n.example.com",
+            required=True
         )
-
-        if self.config.deployment_mode == "eks":
-            self.config.n8n_host = self.prompt(
-                "N8N Host (FQDN for ingress)",
-                default=self.config.domain if self.config.domain else "n8n.lrproduhub.com",
-                required=True
-            )
 
         # Timezone
         common_timezones = [
@@ -351,6 +390,83 @@ class ConfigurationPrompt:
             "Timezone",
             default="America/Bahia"
         )
+
+        # TLS/Certificate Configuration
+        print(f"\n{Colors.BOLD}TLS/Certificate Configuration{Colors.ENDC}")
+        print("Choose how to configure TLS for your n8n deployment:")
+
+        tls_choice = self.prompt_choice(
+            "TLS Configuration",
+            [
+                "No TLS (HTTP only - access via Load Balancer DNS)",
+                "Bring Your Own Certificate (provide PEM files)",
+                "Let's Encrypt (auto-generated, HTTP-01 validation)"
+            ],
+            default=0
+        )
+
+        if "No TLS" in tls_choice:
+            self.config.tls_certificate_source = "none"
+            print(f"{Colors.WARNING}⚠️  Note: Communication will not be encrypted{Colors.ENDC}")
+
+        elif "Bring Your Own" in tls_choice:
+            self.config.tls_certificate_source = "byo"
+
+            # Get certificate file
+            while True:
+                cert_path = self.prompt(
+                    "Path to TLS certificate file (PEM format)",
+                    required=True
+                )
+                valid, content = CertificateValidator.validate_pem_file(cert_path, "certificate")
+                if valid:
+                    self.config.tls_certificate_crt = content
+                    print(f"{Colors.OKGREEN}✓ Certificate validated{Colors.ENDC}")
+                    break
+                else:
+                    print(f"{Colors.FAIL}✗ {content}{Colors.ENDC}")
+
+            # Get private key file
+            while True:
+                key_path = self.prompt(
+                    "Path to TLS private key file (PEM format)",
+                    required=True
+                )
+                valid, content = CertificateValidator.validate_pem_file(key_path, "key")
+                if valid:
+                    self.config.tls_certificate_key = content
+                    print(f"{Colors.OKGREEN}✓ Private key validated{Colors.ENDC}")
+                    break
+                else:
+                    print(f"{Colors.FAIL}✗ {content}{Colors.ENDC}")
+
+        elif "Let's Encrypt" in tls_choice:
+            self.config.tls_certificate_source = "letsencrypt"
+
+            # Get email for Let's Encrypt
+            while True:
+                email = self.prompt(
+                    "Email address for Let's Encrypt notifications",
+                    required=True
+                )
+                if CertificateValidator.validate_email(email):
+                    self.config.letsencrypt_email = email
+                    print(f"{Colors.OKGREEN}✓ Email validated{Colors.ENDC}")
+                    break
+                else:
+                    print(f"{Colors.FAIL}✗ Invalid email format{Colors.ENDC}")
+
+            # Ask about staging vs production
+            use_staging = self.prompt_yes_no(
+                "Use Let's Encrypt staging environment? (recommended for testing)",
+                default=False
+            )
+            self.config.letsencrypt_environment = "staging" if use_staging else "production"
+
+            print(f"\n{Colors.WARNING}⚠️  Important for Let's Encrypt:{Colors.ENDC}")
+            print(f"  1. Ensure DNS record for {self.config.n8n_host} points to the Load Balancer")
+            print(f"  2. Certificate issuance takes ~2-5 minutes after deployment")
+            print(f"  3. Production environment has rate limits (5 certs/week per domain)")
 
         # Encryption key
         if self.prompt_yes_no("\nGenerate a new n8n encryption key?", default=True):
@@ -374,19 +490,24 @@ class ConfigurationPrompt:
         """Display configuration summary"""
         print(f"\n{Colors.HEADER}{Colors.BOLD}Configuration Summary{Colors.ENDC}")
         print("=" * 60)
-        print(f"Deployment Mode: {Colors.OKCYAN}{self.config.deployment_mode.upper()}{Colors.ENDC}")
+        print(f"Deployment:      {Colors.OKCYAN}AWS EKS (Kubernetes){Colors.ENDC}")
         print(f"AWS Profile:     {Colors.OKCYAN}{self.config.aws_profile}{Colors.ENDC}")
         print(f"AWS Region:      {Colors.OKCYAN}{self.config.aws_region}{Colors.ENDC}")
-
-        if self.config.deployment_mode == "ec2":
-            print(f"Instance Type:   {Colors.OKCYAN}{self.config.instance_type}{Colors.ENDC}")
-
-        print(f"Domain:          {Colors.OKCYAN}{self.config.domain or '(None - will use public IP)'}{Colors.ENDC}")
-
-        if self.config.deployment_mode == "eks":
-            print(f"N8N Host:        {Colors.OKCYAN}{self.config.n8n_host}{Colors.ENDC}")
-
+        print(f"Cluster Name:    {Colors.OKCYAN}{self.config.cluster_name}{Colors.ENDC}")
+        print(f"Node Type:       {Colors.OKCYAN}{self.config.node_instance_types[0]}{Colors.ENDC}")
+        print(f"Node Count:      {Colors.OKCYAN}{self.config.node_desired_size}{Colors.ENDC}")
+        print(f"N8N Host:        {Colors.OKCYAN}{self.config.n8n_host}{Colors.ENDC}")
         print(f"Timezone:        {Colors.OKCYAN}{self.config.timezone}{Colors.ENDC}")
+
+        # TLS Configuration
+        if self.config.tls_certificate_source == "none":
+            print(f"TLS:             {Colors.WARNING}Disabled (HTTP only){Colors.ENDC}")
+        elif self.config.tls_certificate_source == "byo":
+            print(f"TLS:             {Colors.OKGREEN}Enabled (Bring Your Own Certificate){Colors.ENDC}")
+        elif self.config.tls_certificate_source == "letsencrypt":
+            print(f"TLS:             {Colors.OKGREEN}Enabled (Let's Encrypt {self.config.letsencrypt_environment}){Colors.ENDC}")
+            print(f"LE Email:        {Colors.OKCYAN}{self.config.letsencrypt_email}{Colors.ENDC}")
+
         print(f"Encryption Key:  {Colors.OKCYAN}{'*' * 20} (hidden){Colors.ENDC}")
         print("=" * 60)
 
@@ -459,17 +580,44 @@ class FileUpdater:
         print(f"{Colors.OKGREEN}✓ Updated terraform/variables.tf{Colors.ENDC}")
 
     def create_terraform_tfvars(self, config: DeploymentConfig):
-        """Create terraform.tfvars with sensitive values"""
+        """Create terraform.tfvars for EKS deployment"""
         tfvars_file = self.terraform_dir / "terraform.tfvars"
 
-        content = f'''# Auto-generated by setup.py
-aws_profile         = "{config.aws_profile}"
-region              = "{config.aws_region}"
-instance_type       = "{config.instance_type}"
-domain              = "{config.domain}"
-timezone            = "{config.timezone}"
-n8n_encryption_key  = "{config.n8n_encryption_key}"
-'''
+        # Build tfvars content
+        lines = [
+            "# Auto-generated by setup.py - N8N EKS Deployment",
+            f'aws_profile        = "{config.aws_profile}"',
+            f'region             = "{config.aws_region}"',
+            f'cluster_name       = "{config.cluster_name}"',
+            f'node_instance_types = {json.dumps(config.node_instance_types)}',
+            f'node_desired_size  = {config.node_desired_size}',
+            f'n8n_host           = "{config.n8n_host}"',
+            f'timezone           = "{config.timezone}"',
+            f'n8n_encryption_key = "{config.n8n_encryption_key}"',
+            "",
+            "# TLS Configuration",
+            f'tls_certificate_source = "{config.tls_certificate_source}"',
+        ]
+
+        # Add TLS-specific configuration
+        if config.tls_certificate_source == "byo":
+            lines.extend([
+                f'tls_certificate_crt = <<EOF',
+                config.tls_certificate_crt.strip(),
+                'EOF',
+                f'tls_certificate_key = <<EOF',
+                config.tls_certificate_key.strip(),
+                'EOF',
+            ])
+        elif config.tls_certificate_source == "letsencrypt":
+            lines.extend([
+                f'letsencrypt_email       = "{config.letsencrypt_email}"',
+                f'letsencrypt_environment = "{config.letsencrypt_environment}"',
+                'enable_cert_manager     = true',
+            ])
+
+        lines.append("")  # trailing newline
+        content = "\n".join(lines)
 
         tfvars_file.write_text(content)
         print(f"{Colors.OKGREEN}✓ Created terraform/terraform.tfvars{Colors.ENDC}")
@@ -524,17 +672,14 @@ n8n_encryption_key  = "{config.n8n_encryption_key}"
         return re.sub(pattern, replacement, content, flags=re.MULTILINE)
 
     def apply_configuration(self, config: DeploymentConfig):
-        """Apply configuration to all files"""
+        """Apply configuration to all files for EKS deployment"""
         print(f"\n{Colors.HEADER}📝 Updating configuration files...{Colors.ENDC}")
 
         self.create_backup()
 
         try:
-            if config.deployment_mode == "ec2":
-                self.update_terraform_variables(config)
-                self.create_terraform_tfvars(config)
-            else:
-                self.update_helm_values(config)
+            # Create terraform.tfvars
+            self.create_terraform_tfvars(config)
 
             print(f"{Colors.OKGREEN}✓ All configuration files updated{Colors.ENDC}")
         except Exception as e:
@@ -671,31 +816,23 @@ class HelmRunner:
         return success
 
 def main():
-    """Main execution flow"""
+    """Main execution flow for N8N EKS deployment"""
     script_dir = Path(__file__).parent
 
     print(f"{Colors.BOLD}{Colors.HEADER}")
     print("=" * 60)
-    print("  N8N Deployment Setup")
+    print("  N8N EKS Deployment Setup")
     print("=" * 60)
     print(Colors.ENDC)
 
     try:
-        # Check deployment mode first (quick check)
-        prompt = ConfigurationPrompt()
-        deployment_mode = prompt.prompt_choice(
-            "\nHow would you like to deploy n8n?",
-            ["EC2 (Simple, single instance)", "EKS (Kubernetes, scalable)"],
-            default=0
-        ).split()[0].lower()
-
         # Check dependencies
-        deps_ok, missing = DependencyChecker.check_all_dependencies(deployment_mode)
+        deps_ok, missing = DependencyChecker.check_all_dependencies()
         if not deps_ok:
             sys.exit(1)
 
         # Collect configuration
-        print(f"\n{Colors.HEADER}Let's configure your deployment...{Colors.ENDC}")
+        print(f"\n{Colors.HEADER}Let's configure your EKS deployment...{Colors.ENDC}")
         prompt = ConfigurationPrompt()
         config = prompt.collect_configuration()
 
@@ -703,52 +840,63 @@ def main():
         updater = FileUpdater(script_dir)
         updater.apply_configuration(config)
 
-        # Execute deployment
-        if config.deployment_mode == "ec2":
-            # Terraform workflow
-            tf_runner = TerraformRunner(script_dir / "terraform")
-
-            if not tf_runner.init():
-                raise Exception("Terraform initialization failed")
-
-            if not tf_runner.plan():
-                raise Exception("Terraform plan failed")
-
-            if not tf_runner.apply():
-                raise Exception("Terraform apply failed")
-
-            # Get outputs
-            outputs = tf_runner.get_outputs()
-
-            print(f"\n{Colors.OKGREEN}{Colors.BOLD}🎉 Deployment Complete!{Colors.ENDC}")
-            print("=" * 60)
-
-            if 'url' in outputs:
-                print(f"\nN8N URL: {Colors.OKCYAN}{outputs['url']}{Colors.ENDC}")
-            if 'elastic_ip' in outputs:
-                print(f"Elastic IP: {Colors.OKCYAN}{outputs['elastic_ip']}{Colors.ENDC}")
-            if 'instance_id' in outputs:
-                print(f"Instance ID: {Colors.OKCYAN}{outputs['instance_id']}{Colors.ENDC}")
-
-            print("\n" + "=" * 60)
-
+        # EKS deployment: Terraform handles everything (cluster + n8n via Helm)
+        print(f"\n{Colors.HEADER}🚀 Starting EKS deployment...{Colors.ENDC}")
+        print("This will:")
+        print("  1. Create VPC, subnets, and networking (~5 minutes)")
+        print("  2. Create EKS cluster and node group (~15-20 minutes)")
+        print("  3. Deploy NGINX ingress controller (~2 minutes)")
+        if config.tls_certificate_source == "letsencrypt":
+            print("  4. Install cert-manager for Let's Encrypt (~2 minutes)")
+            print("  5. Deploy n8n with automatic TLS certificate (~3 minutes)")
         else:
-            # Note: EKS deployment would require creating EKS cluster first
-            # This is a simplified path - full EKS setup would need more steps
-            print(f"\n{Colors.WARNING}Note: EKS deployment requires an existing EKS cluster{Colors.ENDC}")
-            print("Please ensure you have:")
-            print("  1. An EKS cluster created")
-            print("  2. kubectl configured to access the cluster")
-            print("  3. An ingress controller installed (nginx)")
+            print("  4. Deploy n8n via Helm (~2 minutes)")
+        print(f"\n{Colors.WARNING}Total estimated time: ~25-30 minutes{Colors.ENDC}")
 
-            if prompt.prompt_yes_no("\nDo you have an EKS cluster ready?", default=False):
-                helm_runner = HelmRunner(script_dir / "helm")
+        tf_runner = TerraformRunner(script_dir / "terraform")
 
-                if helm_runner.install():
-                    print(f"\n{Colors.OKGREEN}{Colors.BOLD}🎉 Helm deployment complete!{Colors.ENDC}")
-                    print(f"\nCheck deployment status with:")
-                    print(f"  {Colors.OKCYAN}kubectl get pods -n default{Colors.ENDC}")
-                    print(f"  {Colors.OKCYAN}kubectl get ingress -n default{Colors.ENDC}")
+        if not tf_runner.init():
+            raise Exception("Terraform initialization failed")
+
+        if not tf_runner.plan():
+            raise Exception("Terraform plan failed")
+
+        if not tf_runner.apply():
+            raise Exception("Terraform apply failed")
+
+        # Get outputs
+        outputs = tf_runner.get_outputs()
+
+        # Configure kubectl
+        if 'configure_kubectl' in outputs:
+            print(f"\n{Colors.HEADER}🔧 Configuring kubectl...{Colors.ENDC}")
+            kubectl_cmd = outputs['configure_kubectl']
+            result = subprocess.run(kubectl_cmd, shell=True, capture_output=True, text=True)
+
+            if result.returncode == 0:
+                print(f"{Colors.OKGREEN}✓ kubectl configured{Colors.ENDC}")
+            else:
+                print(f"{Colors.WARNING}⚠ kubectl configuration failed. Run manually:{Colors.ENDC}")
+                print(f"  {Colors.OKCYAN}{kubectl_cmd}{Colors.ENDC}")
+
+        # Display success and access instructions
+        print(f"\n{Colors.OKGREEN}{Colors.BOLD}🎉 EKS Deployment Complete!{Colors.ENDC}")
+        print("=" * 60)
+
+        # Show access instructions from Terraform output
+        if 'access_instructions' in outputs:
+            print(f"\n{outputs['access_instructions']}")
+
+        # Show useful kubectl commands
+        n8n_namespace = outputs.get('n8n_namespace', 'n8n')
+        print(f"\n{Colors.BOLD}Useful Commands:{Colors.ENDC}")
+        print(f"  {Colors.OKCYAN}kubectl get pods -n {n8n_namespace}{Colors.ENDC}")
+        print(f"  {Colors.OKCYAN}kubectl get ingress -n {n8n_namespace}{Colors.ENDC}")
+        print(f"  {Colors.OKCYAN}kubectl get svc -n ingress-nginx{Colors.ENDC}")
+        if config.tls_certificate_source == "letsencrypt":
+            print(f"  {Colors.OKCYAN}kubectl get certificate -n {n8n_namespace}{Colors.ENDC}")
+
+        print("\n" + "=" * 60)
 
         # Cleanup backup on success
         updater.cleanup_backup()

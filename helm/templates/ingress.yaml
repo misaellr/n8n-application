@@ -3,12 +3,19 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: n8n
+  labels:
+    app: n8n
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+  {{- if .Values.ingress.annotations }}
   annotations:
-    kubernetes.io/ingress.class: {{ .Values.ingress.className | default "nginx" }}
     {{- range $k, $v := .Values.ingress.annotations }}
     {{ $k }}: "{{ $v }}"
     {{- end }}
+  {{- end }}
 spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
   rules:
     - host: {{ .Values.ingress.host }}
       http:
@@ -21,8 +28,13 @@ spec:
                 port:
                   number: {{ .Values.service.port }}
   {{- if .Values.ingress.tls.enabled }}
+  # TLS configuration
+  # - For BYO certificates: secretName points to Terraform-created secret
+  # - For Let's Encrypt: secretName is auto-created by cert-manager
+  #   (requires cert-manager.io/cluster-issuer annotation above)
   tls:
-    - hosts: [{{ .Values.ingress.host }}]
+    - hosts:
+        - {{ .Values.ingress.host }}
       secretName: {{ .Values.ingress.tls.secretName }}
   {{- end }}
 {{- end }}

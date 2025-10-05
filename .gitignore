@@ -153,3 +153,5 @@ Session.vim
 Icon?
 # Documentation
 AGENTS.md
+#Python cache
+__pycache__/

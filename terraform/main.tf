@@ -1,8 +1,22 @@
 terraform {
   required_version = ">= 1.6"
   required_providers {
-    aws    = { source = "hashicorp/aws", version = "~> 5.0" }
-    random = { source = "hashicorp/random", version = "~> 3.6" }
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.23"
+    }
+    helm = {
+      source  = "hashicorp/helm"
+      version = "~> 2.11"
+    }
   }
 }
 
@@ -14,85 +28,284 @@ provider "aws" {
   region  = var.region
 }
 
-########################################
-# Locals (single block)
-########################################
-locals {
-  project_tag = "n8n-ec2"
-
-  # https if a domain is set, else http
-  protocol   = var.domain != "" ? "https" : "http"
-  # value used in Caddyfile host line
-  caddy_site = var.domain != "" ? var.domain : ":80"
-
-  # Two env lines only when a domain is set, with correct YAML indentation
-  webhook_env = var.domain != "" ? join("\n          ", [
-    "WEBHOOK_URL: \"https://${var.domain}/\"",
-    "N8N_PROXY_HOPS: \"1\"",
-  ]) : ""
+# Retrieve EKS cluster info for kubernetes/helm providers
+# Note: These data sources are used after the cluster is created
+data "aws_eks_cluster" "cluster" {
+  name       = aws_eks_cluster.main.name
+  depends_on = [aws_eks_cluster.main]
 }
 
-# Generate a key if one wasn't provided
+data "aws_eks_cluster_auth" "cluster" {
+  name       = aws_eks_cluster.main.name
+  depends_on = [aws_eks_cluster.main]
+}
+
+provider "kubernetes" {
+  host                   = try(data.aws_eks_cluster.cluster.endpoint, "")
+  cluster_ca_certificate = try(base64decode(data.aws_eks_cluster.cluster.certificate_authority[0].data), "")
+  token                  = try(data.aws_eks_cluster_auth.cluster.token, "")
+}
+
+provider "helm" {
+  kubernetes {
+    host                   = try(data.aws_eks_cluster.cluster.endpoint, "")
+    cluster_ca_certificate = try(base64decode(data.aws_eks_cluster.cluster.certificate_authority[0].data), "")
+    token                  = try(data.aws_eks_cluster_auth.cluster.token, "")
+  }
+}
+
+########################################
+# Locals
+########################################
+locals {
+  project_tag = var.project_tag
+  azs         = slice(data.aws_availability_zones.available.names, 0, 3)
+}
+
+# Generate encryption key if not provided
 resource "random_id" "enc" {
   byte_length = 32
 }
 
 locals {
-  # Use coalesce with nonsensitive to handle the conditional without marking issues
-  enc_key = coalesce(nonsensitive(var.n8n_encryption_key), random_id.enc.hex)
-}
+  # Use provided key if non-empty, otherwise generate random key
+  # Unmark sensitive value for comparison and ternary evaluation
+  enc_key = nonsensitive(var.n8n_encryption_key) != "" ? nonsensitive(var.n8n_encryption_key) : random_id.enc.hex
+  n8n_host_raw = trimspace(var.n8n_host)
+  n8n_host     = local.n8n_host_raw != "" ? local.n8n_host_raw : format("%s.local", var.project_tag)
+  n8n_protocol = lower(var.n8n_protocol)
+  n8n_webhook_url = coalesce(
+    var.n8n_webhook_url,
+    format("%s://%s/", local.n8n_protocol, local.n8n_host)
+  )
+  n8n_env = merge({
+    N8N_HOST         = local.n8n_host
+    N8N_PROTOCOL     = local.n8n_protocol
+    N8N_PORT         = tostring(var.n8n_service_port)
+    WEBHOOK_URL      = local.n8n_webhook_url
+    N8N_PROXY_HOPS   = tostring(var.n8n_proxy_hops)
+    GENERIC_TIMEZONE = var.timezone
+  }, var.n8n_env_overrides)
 
-########################################
-# Default VPC + one subnet
-########################################
-data "aws_vpc" "default" { default = true }
+  # Determine TLS annotations based on certificate source
+  tls_annotations = var.tls_certificate_source == "letsencrypt" ? merge(
+    var.n8n_ingress_annotations,
+    {
+      "cert-manager.io/cluster-issuer" = "letsencrypt-${var.letsencrypt_environment}"
+    }
+  ) : var.n8n_ingress_annotations
 
-data "aws_subnets" "default" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
+  n8n_values_override = {
+    replicaCount = 1
+    service = {
+      type = var.n8n_service_type
+      port = var.n8n_service_port
+    }
+    ingress = {
+      enabled     = var.n8n_ingress_enabled
+      className   = var.n8n_ingress_class
+      host        = local.n8n_host
+      annotations = local.tls_annotations
+      tls = {
+        enabled    = var.tls_certificate_source != "none"
+        secretName = var.n8n_tls_secret_name
+      }
+    }
+    persistence = {
+      enabled      = var.n8n_persistence_enabled
+      size         = var.n8n_persistence_size
+      storageClass = var.n8n_persistence_storage_class
+      accessModes  = var.n8n_persistence_access_modes
+    }
+    env = local.n8n_env
   }
 }
 
 ########################################
-# Security Group (80/443 in; all egress)
+# Data Sources
 ########################################
-resource "aws_security_group" "n8n" {
-  name        = "${local.project_tag}-sg"
-  description = "Allow HTTP/HTTPS"
-  vpc_id      = data.aws_vpc.default.id
-
-  ingress {
-    description = "HTTP"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    description = "HTTPS"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    description = "All egress"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = { Project = local.project_tag }
+data "aws_availability_zones" "available" {
+  state = "available"
 }
 
 ########################################
-# IAM for EC2 + SSM
+# VPC
 ########################################
-data "aws_iam_policy_document" "ec2_trust" {
+resource "aws_vpc" "main" {
+  cidr_block           = var.vpc_cidr
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+
+  tags = {
+    Name                                        = "${local.project_tag}-vpc"
+    Project                                     = local.project_tag
+    "kubernetes.io/cluster/${var.cluster_name}" = "shared"
+  }
+}
+
+resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+
+  tags = {
+    Name    = "${local.project_tag}-igw"
+    Project = local.project_tag
+  }
+}
+
+resource "aws_subnet" "public" {
+  count                   = length(local.azs)
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = cidrsubnet(var.vpc_cidr, 8, count.index)
+  availability_zone       = local.azs[count.index]
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name                                        = "${local.project_tag}-public-${local.azs[count.index]}"
+    Project                                     = local.project_tag
+    "kubernetes.io/cluster/${var.cluster_name}" = "shared"
+    "kubernetes.io/role/elb"                    = "1"
+  }
+}
+
+resource "aws_subnet" "private" {
+  count             = length(local.azs)
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = cidrsubnet(var.vpc_cidr, 8, count.index + 100)
+  availability_zone = local.azs[count.index]
+
+  tags = {
+    Name                                        = "${local.project_tag}-private-${local.azs[count.index]}"
+    Project                                     = local.project_tag
+    "kubernetes.io/cluster/${var.cluster_name}" = "shared"
+    "kubernetes.io/role/internal-elb"           = "1"
+  }
+}
+
+resource "aws_eip" "nat" {
+  count  = length(local.azs)
+  domain = "vpc"
+
+  tags = {
+    Name    = "${local.project_tag}-nat-${local.azs[count.index]}"
+    Project = local.project_tag
+  }
+}
+
+resource "aws_nat_gateway" "main" {
+  count         = length(local.azs)
+  allocation_id = aws_eip.nat[count.index].id
+  subnet_id     = aws_subnet.public[count.index].id
+
+  tags = {
+    Name    = "${local.project_tag}-nat-${local.azs[count.index]}"
+    Project = local.project_tag
+  }
+
+  depends_on = [aws_internet_gateway.main]
+}
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.main.id
+  }
+
+  tags = {
+    Name    = "${local.project_tag}-public-rt"
+    Project = local.project_tag
+  }
+}
+
+resource "aws_route_table_association" "public" {
+  count          = length(local.azs)
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.public.id
+}
+
+resource "aws_route_table" "private" {
+  count  = length(local.azs)
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.main[count.index].id
+  }
+
+  tags = {
+    Name    = "${local.project_tag}-private-rt-${local.azs[count.index]}"
+    Project = local.project_tag
+  }
+}
+
+resource "aws_route_table_association" "private" {
+  count          = length(local.azs)
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private[count.index].id
+}
+
+########################################
+# EKS Cluster IAM Role
+########################################
+data "aws_iam_policy_document" "eks_assume_role" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["eks.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "eks_cluster" {
+  name               = "${local.project_tag}-eks-cluster-role"
+  assume_role_policy = data.aws_iam_policy_document.eks_assume_role.json
+
+  tags = {
+    Project = local.project_tag
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "eks_cluster_policy" {
+  role       = aws_iam_role.eks_cluster.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+}
+
+resource "aws_iam_role_policy_attachment" "eks_vpc_resource_controller" {
+  role       = aws_iam_role.eks_cluster.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSVPCResourceController"
+}
+
+########################################
+# EKS Cluster
+########################################
+resource "aws_eks_cluster" "main" {
+  name     = var.cluster_name
+  role_arn = aws_iam_role.eks_cluster.arn
+  version  = var.cluster_version
+
+  vpc_config {
+    subnet_ids              = concat(aws_subnet.public[*].id, aws_subnet.private[*].id)
+    endpoint_private_access = true
+    endpoint_public_access  = true
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.eks_cluster_policy,
+    aws_iam_role_policy_attachment.eks_vpc_resource_controller,
+  ]
+
+  tags = {
+    Name    = var.cluster_name
+    Project = local.project_tag
+  }
+}
+
+########################################
+# EKS Node Group IAM Role
+########################################
+data "aws_iam_policy_document" "node_assume_role" {
   statement {
     actions = ["sts:AssumeRole"]
     principals {
@@ -102,21 +315,39 @@ data "aws_iam_policy_document" "ec2_trust" {
   }
 }
 
-resource "aws_iam_role" "ec2_role" {
-  name               = "${local.project_tag}-role"
-  assume_role_policy = data.aws_iam_policy_document.ec2_trust.json
-  tags               = { Project = local.project_tag }
+resource "aws_iam_role" "eks_nodes" {
+  name               = "${local.project_tag}-eks-node-role"
+  assume_role_policy = data.aws_iam_policy_document.node_assume_role.json
+
+  tags = {
+    Project = local.project_tag
+  }
 }
 
-resource "aws_iam_role_policy_attachment" "ssm_core" {
-  role       = aws_iam_role.ec2_role.name
+resource "aws_iam_role_policy_attachment" "node_worker_policy" {
+  role       = aws_iam_role.eks_nodes.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+}
+
+resource "aws_iam_role_policy_attachment" "node_cni_policy" {
+  role       = aws_iam_role.eks_nodes.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+}
+
+resource "aws_iam_role_policy_attachment" "node_registry_policy" {
+  role       = aws_iam_role.eks_nodes.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+}
+
+resource "aws_iam_role_policy_attachment" "node_ssm_policy" {
+  role       = aws_iam_role.eks_nodes.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-# Allow reading the SecureString key
-resource "aws_iam_role_policy" "ssm_get_param" {
+# Allow reading the n8n encryption key from SSM
+resource "aws_iam_role_policy" "node_ssm_get_param" {
   name = "allow-n8n-ssm-get-parameter"
-  role = aws_iam_role.ec2_role.id
+  role = aws_iam_role.eks_nodes.id
   policy = jsonencode({
     Version = "2012-10-17",
     Statement = [{
@@ -128,144 +359,283 @@ resource "aws_iam_role_policy" "ssm_get_param" {
   })
 }
 
-resource "aws_iam_instance_profile" "ec2_profile" {
-  name = "${local.project_tag}-profile"
-  role = aws_iam_role.ec2_role.name
+########################################
+# EKS Node Group
+########################################
+resource "aws_eks_node_group" "main" {
+  cluster_name    = aws_eks_cluster.main.name
+  node_group_name = "${local.project_tag}-node-group"
+  node_role_arn   = aws_iam_role.eks_nodes.arn
+  subnet_ids      = aws_subnet.private[*].id
+  instance_types  = var.node_instance_types
+
+  scaling_config {
+    desired_size = var.node_desired_size
+    min_size     = var.node_min_size
+    max_size     = var.node_max_size
+  }
+
+  update_config {
+    max_unavailable = 1
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.node_worker_policy,
+    aws_iam_role_policy_attachment.node_cni_policy,
+    aws_iam_role_policy_attachment.node_registry_policy,
+    aws_iam_role_policy_attachment.node_ssm_policy,
+  ]
+
+  tags = {
+    Name    = "${local.project_tag}-node-group"
+    Project = local.project_tag
+  }
 }
 
 ########################################
-# SSM Parameter for the encryption key
+# EBS CSI Driver Addon
+########################################
+# IAM role for EBS CSI driver
+data "aws_iam_policy_document" "ebs_csi_assume_role" {
+  statement {
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.eks.arn]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "${replace(aws_iam_openid_connect_provider.eks.url, "https://", "")}:sub"
+      values   = ["system:serviceaccount:kube-system:ebs-csi-controller-sa"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "${replace(aws_iam_openid_connect_provider.eks.url, "https://", "")}:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "ebs_csi_driver" {
+  name               = "${local.project_tag}-ebs-csi-driver-role"
+  assume_role_policy = data.aws_iam_policy_document.ebs_csi_assume_role.json
+
+  tags = {
+    Project = local.project_tag
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "ebs_csi_driver" {
+  role       = aws_iam_role.ebs_csi_driver.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+}
+
+# OIDC provider for EKS
+data "tls_certificate" "eks" {
+  url = aws_eks_cluster.main.identity[0].oidc[0].issuer
+}
+
+resource "aws_iam_openid_connect_provider" "eks" {
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = [data.tls_certificate.eks.certificates[0].sha1_fingerprint]
+  url             = aws_eks_cluster.main.identity[0].oidc[0].issuer
+
+  tags = {
+    Project = local.project_tag
+  }
+}
+
+# EBS CSI addon
+resource "aws_eks_addon" "ebs_csi" {
+  cluster_name             = aws_eks_cluster.main.name
+  addon_name               = "aws-ebs-csi-driver"
+  service_account_role_arn = aws_iam_role.ebs_csi_driver.arn
+
+  depends_on = [
+    aws_eks_node_group.main,
+    aws_iam_role_policy_attachment.ebs_csi_driver,
+  ]
+
+  tags = {
+    Project = local.project_tag
+  }
+}
+
+# Default StorageClass for EBS volumes
+resource "kubernetes_storage_class" "ebs_gp3" {
+  metadata {
+    name = "ebs-gp3"
+    annotations = {
+      "storageclass.kubernetes.io/is-default-class" = "true"
+    }
+  }
+
+  storage_provisioner    = "ebs.csi.aws.com"
+  reclaim_policy         = "Delete"
+  volume_binding_mode    = "WaitForFirstConsumer"
+  allow_volume_expansion = true
+
+  parameters = {
+    type      = "gp3"
+    encrypted = "true"
+  }
+
+  depends_on = [aws_eks_addon.ebs_csi]
+}
+
+########################################
+# SSM Parameter for n8n encryption key
 ########################################
 resource "aws_ssm_parameter" "n8n_encryption_key" {
   name  = "/n8n/encryption_key"
   type  = "SecureString"
   value = local.enc_key
-  tags  = { Project = local.project_tag }
+
+  tags = {
+    Project = local.project_tag
+  }
 }
 
-########################################
-# AMI (Amazon Linux 2)
-########################################
-data "aws_ssm_parameter" "al2_ami" {
-  name = "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2"
-}
+data "aws_ssm_parameter" "n8n_encryption_key" {
+  name            = aws_ssm_parameter.n8n_encryption_key.name
+  with_decryption = true
 
-########################################
-# EC2 Instance
-########################################
-resource "aws_instance" "n8n" {
   depends_on = [aws_ssm_parameter.n8n_encryption_key]
+}
 
-  ami                         = data.aws_ssm_parameter.al2_ami.value
-  instance_type               = var.instance_type
-  subnet_id                   = element(data.aws_subnets.default.ids, 0)
-  vpc_security_group_ids      = [aws_security_group.n8n.id]
-  associate_public_ip_address = true
-  iam_instance_profile        = aws_iam_instance_profile.ec2_profile.name
+########################################
+# NGINX Ingress Controller (optional)
+########################################
+resource "helm_release" "nginx_ingress" {
+  count = var.enable_nginx_ingress ? 1 : 0
 
-  # Enforce IMDSv2 + encrypt root
-  metadata_options {
-    http_endpoint = "enabled"
-    http_tokens   = "required"
+  name       = "ingress-nginx"
+  repository = "https://kubernetes.github.io/ingress-nginx"
+  chart      = "ingress-nginx"
+  namespace  = "ingress-nginx"
+  version    = "4.11.3"
+
+  create_namespace = true
+
+  set {
+    name  = "controller.service.type"
+    value = "LoadBalancer"
   }
 
-  root_block_device {
-    volume_size = 16
-    volume_type = "gp3"
-    encrypted   = true
+  set {
+    name  = "controller.service.annotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-type"
+    value = "nlb"
   }
 
-  user_data = <<-EOT
-    #!/bin/bash
-    set -euxo pipefail
+  depends_on = [
+    aws_eks_node_group.main,
+    aws_eks_addon.ebs_csi,
+  ]
+}
 
-    yum update -y
-    amazon-linux-extras install -y docker
-    systemctl enable docker
-    systemctl start docker
+########################################
+# cert-manager (for Let's Encrypt)
+########################################
+resource "helm_release" "cert_manager" {
+  count = var.enable_cert_manager ? 1 : 0
 
-    # AWS CLI to fetch SSM parameter
-    yum install -y awscli
+  name             = "cert-manager"
+  repository       = "https://charts.jetstack.io"
+  chart            = "cert-manager"
+  namespace        = "cert-manager"
+  version          = var.cert_manager_version
+  create_namespace = true
 
-    # docker-compose v2
-    curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" \
-      -o /usr/local/bin/docker-compose
-    chmod +x /usr/local/bin/docker-compose
+  set {
+    name  = "installCRDs"
+    value = "true"
+  }
 
-    mkdir -p /opt/n8n && cd /opt/n8n
+  depends_on = [
+    aws_eks_node_group.main,
+    aws_eks_addon.ebs_csi,
+  ]
+}
 
-    # Decrypt the key from SSM
-    ENC="$(aws ssm get-parameter --name /n8n/encryption_key --with-decryption --region ${var.region} --query 'Parameter.Value' --output text)"
+# ClusterIssuer for Let's Encrypt
+resource "kubernetes_manifest" "letsencrypt_issuer" {
+  count = var.tls_certificate_source == "letsencrypt" ? 1 : 0
 
-    # Compose file (unquoted heredoc so bash can expand $ENC variable)
-    cat > docker-compose.yml <<YAML
-    version: "3.8"
-    services:
-      n8n:
-        image: docker.n8n.io/n8nio/n8n:latest
-        restart: unless-stopped
-        environment:
-          GENERIC_TIMEZONE: "${var.timezone}"
-          TZ: "${var.timezone}"
-          N8N_ENCRYPTION_KEY: "$${ENC}"
-          N8N_RUNNERS_ENABLED: "true"
-          N8N_HOST: "${var.domain}"
-          N8N_PROTOCOL: "${local.protocol}"
-          N8N_PORT: "5678"
-          ${local.webhook_env}
-          # N8N_BASIC_AUTH_ACTIVE: "true"
-          # N8N_BASIC_AUTH_USER: "admin"
-          # N8N_BASIC_AUTH_PASSWORD: "change-me"
-        volumes:
-          - ./n8n_data:/home/node/.n8n
-        expose:
-          - "5678"
-
-      caddy:
-        image: caddy:2
-        restart: unless-stopped
-        ports:
-          - "80:80"
-          - "443:443"
-        volumes:
-          - ./Caddyfile:/etc/caddy/Caddyfile
-          - caddy_data:/data
-          - caddy_config:/config
-        depends_on:
-          - n8n
-
-    volumes:
-      caddy_data: {}
-      caddy_config: {}
-    YAML
-
-    # Caddyfile
-    cat > Caddyfile <<CADDY
-    ${local.caddy_site} {
-      encode zstd gzip
-      reverse_proxy n8n:5678
+  manifest = {
+    apiVersion = "cert-manager.io/v1"
+    kind       = "ClusterIssuer"
+    metadata = {
+      name = "letsencrypt-${var.letsencrypt_environment}"
     }
-    CADDY
+    spec = {
+      acme = {
+        server = var.letsencrypt_environment == "production" ? "https://acme-v02.api.letsencrypt.org/directory" : "https://acme-staging-v02.api.letsencrypt.org/directory"
+        email  = var.letsencrypt_email
+        privateKeySecretRef = {
+          name = "letsencrypt-${var.letsencrypt_environment}"
+        }
+        solvers = [
+          {
+            http01 = {
+              ingress = {
+                class = var.n8n_ingress_class
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
 
-    mkdir -p /opt/n8n/n8n_data
-    chown -R 1000:1000 /opt/n8n/n8n_data
+  depends_on = [helm_release.cert_manager]
+}
 
-    /usr/local/bin/docker-compose pull
-    /usr/local/bin/docker-compose up -d
-  EOT
+# TLS Secret for BYO certificates
+resource "kubernetes_secret" "tls_certificate" {
+  count = var.tls_certificate_source == "byo" ? 1 : 0
 
-  tags = { Name = local.project_tag, Project = local.project_tag }
+  metadata {
+    name      = var.n8n_tls_secret_name
+    namespace = var.n8n_namespace
+  }
+
+  type = "kubernetes.io/tls"
+
+  data = {
+    "tls.crt" = base64encode(var.tls_certificate_crt)
+    "tls.key" = base64encode(var.tls_certificate_key)
+  }
+
+  depends_on = [aws_eks_cluster.main]
 }
 
 ########################################
-# Elastic IP for stable DNS
+# n8n Helm deployment
 ########################################
-resource "aws_eip" "n8n" {
-  domain = "vpc"
-  tags   = { Project = local.project_tag }
-}
+resource "helm_release" "n8n" {
+  name             = "n8n"
+  chart            = "${path.module}/../helm"
+  namespace        = var.n8n_namespace
+  create_namespace = true
 
-resource "aws_eip_association" "n8n" {
-  instance_id   = aws_instance.n8n.id
-  allocation_id = aws_eip.n8n.id
+  values = [
+    file("${path.module}/../helm/values.yaml"),
+    yamlencode(local.n8n_values_override),
+  ]
+
+  set_sensitive {
+    name  = "envSecrets.N8N_ENCRYPTION_KEY"
+    value = data.aws_ssm_parameter.n8n_encryption_key.value
+  }
+
+  depends_on = [
+    aws_eks_node_group.main,
+    aws_eks_addon.ebs_csi,
+    aws_ssm_parameter.n8n_encryption_key,
+    kubernetes_storage_class.ebs_gp3,
+    helm_release.nginx_ingress,
+    helm_release.cert_manager,
+    kubernetes_secret.tls_certificate,
+    kubernetes_manifest.letsencrypt_issuer,
+  ]
 }

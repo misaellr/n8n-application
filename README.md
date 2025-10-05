@@ -1,16 +1,17 @@
-# N8N Deployment Automation
+# N8N EKS Deployment Automation
 
-Automated deployment setup for n8n workflow automation platform on AWS using Terraform (EC2) or Helm (EKS/Kubernetes).
+Automated deployment setup for n8n workflow automation platform on AWS EKS (Kubernetes) using Terraform and Helm.
 
 ## Features
 
-- 🚀 **Interactive CLI Setup** - Guided configuration prompts for all deployment options
+- 🚀 **Interactive CLI Setup** - Guided configuration prompts for EKS deployment
 - ✅ **Dependency Checking** - Automatically verifies required tools are installed
 - 🔐 **AWS Authentication** - Validates AWS credentials before deployment
 - 🔄 **Idempotent Operations** - Safe to interrupt; changes only applied after full configuration
-- 📦 **Dual Deployment Modes** - EC2 (simple) or EKS (scalable Kubernetes)
+- ☸️ **Production-Ready EKS** - Multi-AZ, highly available Kubernetes cluster
 - 🔒 **Secure Configuration** - Handles encryption keys and sensitive data securely
 - ↩️ **Auto Rollback** - Restores previous configuration on errors or interruption
+- 📊 **Complete Infrastructure** - VPC, networking, storage, ingress all automated
 
 ## Prerequisites
 
@@ -33,8 +34,6 @@ Automated deployment setup for n8n workflow automation platform on AWS using Ter
    ```
 
 3. **Python 3** (>= 3.7) - Usually pre-installed on most systems
-
-### Optional Tools (for EKS deployment)
 
 4. **Helm** (>= 3.0)
    ```bash
@@ -74,75 +73,60 @@ You'll need:
    ```
 
 3. **Follow the interactive prompts**
-   - Choose deployment mode (EC2 or EKS)
    - Select AWS profile and region
-   - Configure n8n settings (domain, timezone, etc.)
+   - Configure EKS cluster settings (name, node types, sizing)
+   - Configure n8n settings (hostname, timezone, storage, etc.)
    - Review configuration summary
    - Confirm to proceed
 
-4. **Wait for deployment**
-   - The script will automatically run Terraform/Helm
-   - For EC2: Creates EC2 instance, security groups, and deploys n8n
-   - For EKS: Deploys n8n to your Kubernetes cluster
+4. **Wait for deployment** (~25-30 minutes)
+   - The script will automatically run Terraform and Helm
+   - Creates VPC, EKS cluster, node group, and all networking
+   - Deploys n8n via Helm chart with ingress
 
-## Deployment Modes
+## What Gets Deployed
 
-### EC2 Mode (Recommended for Simple Deployments)
+**Infrastructure (via Terraform):**
+- VPC with public/private subnets across 3 Availability Zones
+- NAT Gateways (3x) for private subnet internet access
+- Internet Gateway for public subnet access
+- EKS cluster (Kubernetes 1.31) with managed control plane
+- EKS node group (2x t3.medium instances by default) in private subnets
+- EBS CSI driver addon for persistent storage
+- Default StorageClass (gp3, encrypted)
+- NGINX Ingress Controller with Network Load Balancer
+- IAM roles and policies (cluster, nodes, IRSA for EBS CSI)
+- SSM Parameter Store for n8n encryption key (SecureString)
 
-**What it creates:**
-- EC2 instance with Docker and Docker Compose
-- n8n container with Caddy reverse proxy
-- Security group (ports 80/443)
-- Elastic IP for stable public access
-- SSM Parameter Store for encryption key
-- IAM role for SSM access
+**Application (via Helm):**
+- N8N deployment with configurable resources
+- PersistentVolumeClaim (10Gi by default) for data storage
+- Kubernetes Service (ClusterIP)
+- Ingress resource for external access
+- Kubernetes Secret for encryption key
+- Optional: Horizontal Pod Autoscaler
 
 **Configuration options:**
 - AWS Region
-- Instance Type (t3.micro, t3.small, t3.medium, etc.)
-- Domain name (optional, for HTTPS via Caddy)
+- EKS cluster name
+- Node instance types (t3.small, t3.medium, t3.large)
+- Node group sizing (min/desired/max)
+- N8N hostname (FQDN) - required
+- Kubernetes namespace (default: n8n)
+- Storage size (default: 10Gi)
 - Timezone
 - n8n encryption key (auto-generated or provide your own)
 
 **Access:**
-- With domain: `https://your-domain.com`
-- Without domain: `http://<elastic-ip>`
-
-### EKS Mode (For Production/Scalable Deployments)
-
-**Prerequisites:**
-- Existing EKS cluster
-- kubectl configured to access cluster
-- Ingress controller installed (nginx-ingress recommended)
-- cert-manager (optional, for TLS certificates)
-
-**What it creates:**
-- Kubernetes Deployment for n8n
-- Service (ClusterIP)
-- Ingress resource with TLS
-- PersistentVolumeClaim for data storage
-- Secret for sensitive configuration
-- Optional HPA (Horizontal Pod Autoscaler)
-
-**Configuration options:**
-- N8N host (FQDN)
-- Timezone
-- Resource limits (CPU/Memory)
-- Encryption key
-- Database configuration (optional PostgreSQL)
+- Via ingress hostname: `https://your-hostname.com` (requires DNS configuration)
 
 ## Configuration Files
 
 The setup script modifies these files based on your inputs:
 
-### For EC2 Deployment
-
-- `terraform/variables.tf` - Variable defaults
-- `terraform/terraform.tfvars` - Actual configuration values (created)
-
-### For EKS Deployment
-
-- `helm/values.yaml` - Helm chart configuration
+- `terraform/terraform.tfvars` - Terraform configuration values (created by setup script)
+- Terraform reads default values from `terraform/variables.tf`
+- Helm reads configuration from `helm/values.yaml` and Terraform provides overrides
 
 **Note:** Original files are backed up before modification. If setup is interrupted, backups are automatically restored.
 
@@ -155,39 +139,6 @@ You can safely interrupt the setup at any time:
 - No changes are applied until you confirm the configuration summary
 
 ## Post-Deployment
-
-### EC2 Deployment
-
-After successful deployment, you'll see:
-
-```
-🎉 Deployment Complete!
-============================================================
-
-N8N URL: http://XX.XX.XX.XX or https://your-domain.com
-Elastic IP: XX.XX.XX.XX
-Instance ID: i-xxxxxxxxxxxxx
-```
-
-**First-time setup:**
-1. Open the N8N URL in your browser
-2. Create your admin account
-3. Start building workflows!
-
-**SSH Access (via SSM):**
-```bash
-aws ssm start-session --target <instance-id> --profile <your-profile>
-```
-
-**View logs:**
-```bash
-aws ssm start-session --target <instance-id> --profile <your-profile>
-# Then in the session:
-cd /opt/n8n
-docker-compose logs -f
-```
-
-### EKS Deployment
 
 Check deployment status:
 
@@ -204,10 +155,13 @@ kubectl logs -f deployment/n8n -n default
 
 ## Manual Deployment (Without Setup Script)
 
-### EC2 via Terraform
+If you prefer to run Terraform and Helm manually:
 
 ```bash
 cd terraform
+
+# Create terraform.tfvars with your configuration
+# See terraform/variables.tf for available options
 
 # Initialize
 terraform init
@@ -215,31 +169,14 @@ terraform init
 # Review changes
 terraform plan
 
-# Apply
+# Apply (creates EKS cluster, VPC, networking, and deploys n8n via Helm)
 terraform apply
 
-# Get outputs
+# Get outputs (cluster name, endpoint, configure kubectl command)
 terraform output
 ```
 
-### EKS via Helm
-
-```bash
-cd helm
-
-# Edit values.yaml with your configuration
-# At minimum, update:
-# - ingress.host
-# - env.N8N_HOST
-# - env.WEBHOOK_URL
-# - envSecrets.N8N_ENCRYPTION_KEY
-
-# Install
-helm install n8n . --namespace default --create-namespace
-
-# Check status
-helm status n8n -n default
-```
+**Note:** Terraform automatically deploys n8n via the `helm_release` resource. You don't need to run `helm install` separately.
 
 ## Configuration Reference
 
@@ -249,8 +186,13 @@ helm status n8n -n default
 |----------|---------|-------------|
 | `aws_profile` | cloud-native-misael | AWS CLI profile |
 | `region` | us-east-1 | AWS region |
-| `instance_type` | t3.small | EC2 instance type |
-| `domain` | "" | Optional domain for HTTPS |
+| `cluster_name` | n8n-eks-cluster | EKS cluster name |
+| `node_instance_types` | ["t3.medium"] | Node instance types |
+| `node_desired_size` | 2 | Desired number of nodes |
+| `node_min_size` | 1 | Minimum number of nodes |
+| `node_max_size` | 3 | Maximum number of nodes |
+| `n8n_host` | n8n.lrproduhub.com | N8N ingress hostname (FQDN) |
+| `n8n_namespace` | n8n | Kubernetes namespace |
 | `timezone` | America/Bahia | Timezone for n8n |
 | `n8n_encryption_key` | (generated) | 64-char hex encryption key |
 
@@ -284,20 +226,7 @@ helm status n8n -n default
 - Verify Terraform is properly installed
 - Try manual init: `cd terraform && terraform init`
 
-### EC2 Deployment Issues
-
-**Instance not accessible**
-- Check security group rules (ports 80/443)
-- Verify Elastic IP association
-- Check instance status in AWS Console
-
-**n8n not running**
-- SSH into instance via SSM
-- Check Docker status: `systemctl status docker`
-- Check containers: `cd /opt/n8n && docker-compose ps`
-- View logs: `docker-compose logs`
-
-### EKS Deployment Issues
+### Deployment Issues
 
 **Pods not starting**
 ```bash
@@ -323,62 +252,59 @@ kubectl logs <pod-name> -n default
 3. **Terraform State**: Store state in S3 with encryption and versioning for production.
 
 4. **Secrets Management**:
-   - EC2: Uses AWS SSM Parameter Store
-   - EKS: Uses Kubernetes Secrets (consider external-secrets-operator for production)
+   - Uses AWS SSM Parameter Store (SecureString) for n8n encryption key
+   - Kubernetes Secrets for runtime secrets
+   - Consider external-secrets-operator for production to sync from AWS Secrets Manager
 
 5. **Network Security**:
-   - EC2: Security group restricts access to ports 80/443
-   - EKS: Use network policies to restrict pod communication
+   - All EKS nodes deployed in private subnets
+   - Security groups restrict access appropriately
+   - Use Kubernetes Network Policies to restrict pod communication
+   - Consider using AWS Security Groups for Pods
 
 6. **HTTPS**:
-   - EC2: Caddy auto-provisions Let's Encrypt certificates when domain is configured
-   - EKS: Use cert-manager with Let's Encrypt
+   - Configure TLS termination at ingress level
+   - Use cert-manager with Let's Encrypt for automatic certificate management
+   - Or terminate TLS at ALB/NLB level with ACM certificates
 
 ## Cleanup
-
-### EC2 Deployment
 
 ```bash
 cd terraform
 terraform destroy
 ```
 
-This will remove:
-- EC2 instance
-- Elastic IP
-- Security group
+This will remove all resources:
+- EKS cluster and node group
+- VPC, subnets, NAT gateways, Internet gateway
+- Network Load Balancer
 - IAM roles and policies
 - SSM parameters
-
-### EKS Deployment
-
-```bash
-helm uninstall n8n -n default
-kubectl delete pvc n8n-data -n default
-```
+- N8N Helm release
+- PersistentVolumeClaims and EBS volumes
 
 ## Cost Estimation
 
-### EC2 Deployment (us-east-1)
+### EKS Deployment (us-east-1)
 
-- t3.micro: ~$7/month
-- t3.small: ~$15/month
-- t3.medium: ~$30/month
-- Elastic IP: Free while associated
-- Data transfer: Varies by usage
+- EKS control plane: ~$73/month
+- EC2 nodes (2x t3.medium): ~$60/month
+- NAT Gateways (3x): ~$97/month
+- Network Load Balancer: ~$16/month
+- EBS volumes (10Gi): ~$1/month
+- Data transfer: Varies by usage (~$5-10/month)
+- **Total: ~$252-262/month**
 
-### EKS Deployment
-
-- EKS cluster: ~$73/month
-- Worker nodes: Varies by instance type
-- EBS volumes: ~$0.10/GB/month
-- Load balancer: ~$16/month
+**Cost optimization options:**
+- Use 1 NAT Gateway instead of 3 (saves ~$65/month, reduces HA)
+- Use t3.small nodes (saves ~$30/month)
+- Reduce node count to 1 (saves ~$30/month, reduces HA)
 
 ## Advanced Configuration
 
-### Using PostgreSQL (EKS)
+### Using PostgreSQL
 
-Edit `helm/values.yaml`:
+You can configure n8n to use PostgreSQL instead of SQLite by editing `helm/values.yaml`:
 
 ```yaml
 envSecrets:
@@ -391,7 +317,7 @@ envSecrets:
   DB_POSTGRESDB_PASSWORD: "<password>"
 ```
 
-### Enabling HPA (EKS)
+### Enabling HPA (Horizontal Pod Autoscaler)
 
 Edit `helm/values.yaml`:
 
@@ -403,14 +329,17 @@ hpa:
   targetCPUUtilizationPercentage: 70
 ```
 
-### Custom Domain with Route53 (EC2)
+### Custom Domain with Route53
 
 After deployment:
 
-1. Get Elastic IP from Terraform output
-2. Create Route53 A record pointing to Elastic IP
-3. Re-run setup with domain configured
-4. Caddy will automatically provision SSL certificate
+1. Get Network Load Balancer DNS from Terraform output or via:
+   ```bash
+   kubectl get ingress n8n -n n8n
+   ```
+2. Create Route53 CNAME or ALIAS record pointing to the NLB DNS
+3. Wait for DNS propagation (5-30 minutes)
+4. Access n8n via your custom domain
 
 ## Support
 
