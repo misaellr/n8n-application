@@ -1,7 +1,6 @@
 variable "aws_profile" {
-  description = "AWS CLI profile to use"
+  description = "The AWS CLI profile to use for deployment. Configure your profile using 'aws configure --profile <your-profile-name>'."
   type        = string
-  default     = "cloud-native-misael"
 }
 
 variable "region" {

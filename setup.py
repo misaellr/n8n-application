@@ -295,8 +295,12 @@ class ConfigurationPrompt:
             except EOFError:
                 raise SetupInterrupted("\nSetup interrupted")
 
-    def collect_configuration(self) -> DeploymentConfig:
-        """Collect all configuration from user"""
+    def collect_configuration(self, skip_tls: bool = True) -> DeploymentConfig:
+        """Collect all configuration from user
+
+        Args:
+            skip_tls: If True, skip TLS configuration (TLS will be configured after LoadBalancer is ready)
+        """
         print(f"\n{Colors.HEADER}{Colors.BOLD}N8N EKS Deployment Configuration{Colors.ENDC}")
         print("=" * 60)
 
@@ -391,83 +395,6 @@ class ConfigurationPrompt:
             default="America/Bahia"
         )
 
-        # TLS/Certificate Configuration
-        print(f"\n{Colors.BOLD}TLS/Certificate Configuration{Colors.ENDC}")
-        print("Choose how to configure TLS for your n8n deployment:")
-
-        tls_choice = self.prompt_choice(
-            "TLS Configuration",
-            [
-                "No TLS (HTTP only - access via Load Balancer DNS)",
-                "Bring Your Own Certificate (provide PEM files)",
-                "Let's Encrypt (auto-generated, HTTP-01 validation)"
-            ],
-            default=0
-        )
-
-        if "No TLS" in tls_choice:
-            self.config.tls_certificate_source = "none"
-            print(f"{Colors.WARNING}⚠️  Note: Communication will not be encrypted{Colors.ENDC}")
-
-        elif "Bring Your Own" in tls_choice:
-            self.config.tls_certificate_source = "byo"
-
-            # Get certificate file
-            while True:
-                cert_path = self.prompt(
-                    "Path to TLS certificate file (PEM format)",
-                    required=True
-                )
-                valid, content = CertificateValidator.validate_pem_file(cert_path, "certificate")
-                if valid:
-                    self.config.tls_certificate_crt = content
-                    print(f"{Colors.OKGREEN}✓ Certificate validated{Colors.ENDC}")
-                    break
-                else:
-                    print(f"{Colors.FAIL}✗ {content}{Colors.ENDC}")
-
-            # Get private key file
-            while True:
-                key_path = self.prompt(
-                    "Path to TLS private key file (PEM format)",
-                    required=True
-                )
-                valid, content = CertificateValidator.validate_pem_file(key_path, "key")
-                if valid:
-                    self.config.tls_certificate_key = content
-                    print(f"{Colors.OKGREEN}✓ Private key validated{Colors.ENDC}")
-                    break
-                else:
-                    print(f"{Colors.FAIL}✗ {content}{Colors.ENDC}")
-
-        elif "Let's Encrypt" in tls_choice:
-            self.config.tls_certificate_source = "letsencrypt"
-
-            # Get email for Let's Encrypt
-            while True:
-                email = self.prompt(
-                    "Email address for Let's Encrypt notifications",
-                    required=True
-                )
-                if CertificateValidator.validate_email(email):
-                    self.config.letsencrypt_email = email
-                    print(f"{Colors.OKGREEN}✓ Email validated{Colors.ENDC}")
-                    break
-                else:
-                    print(f"{Colors.FAIL}✗ Invalid email format{Colors.ENDC}")
-
-            # Ask about staging vs production
-            use_staging = self.prompt_yes_no(
-                "Use Let's Encrypt staging environment? (recommended for testing)",
-                default=False
-            )
-            self.config.letsencrypt_environment = "staging" if use_staging else "production"
-
-            print(f"\n{Colors.WARNING}⚠️  Important for Let's Encrypt:{Colors.ENDC}")
-            print(f"  1. Ensure DNS record for {self.config.n8n_host} points to the Load Balancer")
-            print(f"  2. Certificate issuance takes ~2-5 minutes after deployment")
-            print(f"  3. Production environment has rate limits (5 certs/week per domain)")
-
         # Encryption key
         if self.prompt_yes_no("\nGenerate a new n8n encryption key?", default=True):
             self.config.n8n_encryption_key = secrets.token_hex(32)
@@ -498,18 +425,9 @@ class ConfigurationPrompt:
         print(f"Node Count:      {Colors.OKCYAN}{self.config.node_desired_size}{Colors.ENDC}")
         print(f"N8N Host:        {Colors.OKCYAN}{self.config.n8n_host}{Colors.ENDC}")
         print(f"Timezone:        {Colors.OKCYAN}{self.config.timezone}{Colors.ENDC}")
-
-        # TLS Configuration
-        if self.config.tls_certificate_source == "none":
-            print(f"TLS:             {Colors.WARNING}Disabled (HTTP only){Colors.ENDC}")
-        elif self.config.tls_certificate_source == "byo":
-            print(f"TLS:             {Colors.OKGREEN}Enabled (Bring Your Own Certificate){Colors.ENDC}")
-        elif self.config.tls_certificate_source == "letsencrypt":
-            print(f"TLS:             {Colors.OKGREEN}Enabled (Let's Encrypt {self.config.letsencrypt_environment}){Colors.ENDC}")
-            print(f"LE Email:        {Colors.OKCYAN}{self.config.letsencrypt_email}{Colors.ENDC}")
-
         print(f"Encryption Key:  {Colors.OKCYAN}{'*' * 20} (hidden){Colors.ENDC}")
         print("=" * 60)
+        print(f"\n{Colors.WARNING}Note: TLS will be configured after deployment{Colors.ENDC}")
 
 class FileUpdater:
     """Handles updating Terraform and Helm configuration files"""
@@ -580,12 +498,12 @@ class FileUpdater:
         print(f"{Colors.OKGREEN}✓ Updated terraform/variables.tf{Colors.ENDC}")
 
     def create_terraform_tfvars(self, config: DeploymentConfig):
-        """Create terraform.tfvars for EKS deployment"""
+        """Create terraform.tfvars for EKS infrastructure deployment"""
         tfvars_file = self.terraform_dir / "terraform.tfvars"
 
-        # Build tfvars content
+        # Build tfvars content - infrastructure only, no TLS
         lines = [
-            "# Auto-generated by setup.py - N8N EKS Deployment",
+            "# Auto-generated by setup.py - N8N EKS Infrastructure",
             f'aws_profile        = "{config.aws_profile}"',
             f'region             = "{config.aws_region}"',
             f'cluster_name       = "{config.cluster_name}"',
@@ -594,31 +512,11 @@ class FileUpdater:
             f'n8n_host           = "{config.n8n_host}"',
             f'timezone           = "{config.timezone}"',
             f'n8n_encryption_key = "{config.n8n_encryption_key}"',
+            f'n8n_namespace      = "n8n"',
             "",
-            "# TLS Configuration",
-            f'tls_certificate_source = "{config.tls_certificate_source}"',
         ]
 
-        # Add TLS-specific configuration
-        if config.tls_certificate_source == "byo":
-            lines.extend([
-                f'tls_certificate_crt = <<EOF',
-                config.tls_certificate_crt.strip(),
-                'EOF',
-                f'tls_certificate_key = <<EOF',
-                config.tls_certificate_key.strip(),
-                'EOF',
-            ])
-        elif config.tls_certificate_source == "letsencrypt":
-            lines.extend([
-                f'letsencrypt_email       = "{config.letsencrypt_email}"',
-                f'letsencrypt_environment = "{config.letsencrypt_environment}"',
-                'enable_cert_manager     = true',
-            ])
-
-        lines.append("")  # trailing newline
         content = "\n".join(lines)
-
         tfvars_file.write_text(content)
         print(f"{Colors.OKGREEN}✓ Created terraform/terraform.tfvars{Colors.ENDC}")
 

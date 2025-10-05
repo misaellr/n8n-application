@@ -1061,12 +1061,12 @@ Press Enter to continue or Ctrl+C to exit: _
 
 Available AWS profiles:
   1) default
-  2) cloud-native-misael
+  2) your-profile
   3) production
 
 Select AWS profile [1-3] or enter profile name: 2
 
-Validating credentials for profile 'cloud-native-misael'...
+Validating credentials for profile 'your-profile'...
 ✓ Authenticated as: arn:aws:iam::123456789012:user/misael
 
 Select AWS region:
@@ -1250,7 +1250,7 @@ Your n8n instance will be accessible via HTTP:
 │  📋 Configuration Summary                                  │
 └────────────────────────────────────────────────────────────┘
 
-AWS Profile:        cloud-native-misael
+AWS Profile:        your-profile
 AWS Region:         us-east-1
 Cluster Name:       production-n8n
 Node Instance Type: t3.medium
@@ -1354,15 +1354,14 @@ Instance ID:     i-0abcdef1234567890
 
 3. View instance details:
    aws ec2 describe-instances --instance-ids i-0abcdef1234567890 \
-     --profile cloud-native-misael --region us-east-1
+     --profile <your-profile> --region us-east-1
 
-4. SSH access (via Session Manager):
-   aws ssm start-session --target i-0abcdef1234567890 \
-     --profile cloud-native-misael --region us-east-1
+aws ssm start-session --target i-0abcdef1234567890 \
+     --profile <your-profile> --region us-east-1
 
 5. View logs:
    aws ssm start-session --target i-0abcdef1234567890 \
-     --profile cloud-native-misael --region us-east-1
+     --profile <your-profile> --region us-east-1
    # Then in the session:
    cd /opt/n8n && docker-compose logs -f
 
@@ -1387,17 +1386,17 @@ Error: AWS authentication failed
 
 Details:
   Unable to locate credentials. You can configure credentials by
-  running "aws configure" for profile 'cloud-native-misael'.
+  running "aws configure" for profile '<your-profile>'.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 🔧 How to fix:
 
 1. Configure AWS credentials:
-   aws configure --profile cloud-native-misael
+   aws configure --profile <your-profile>
 
 2. Verify credentials work:
-   aws sts get-caller-identity --profile cloud-native-misael
+   aws sts get-caller-identity --profile <your-profile>
 
 3. Re-run setup:
    python3 setup.py

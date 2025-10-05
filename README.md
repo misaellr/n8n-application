@@ -184,7 +184,7 @@ terraform output
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `aws_profile` | cloud-native-misael | AWS CLI profile |
+| `aws_profile` | Your AWS profile name | AWS CLI profile to use for deployment. |
 | `region` | us-east-1 | AWS region |
 | `cluster_name` | n8n-eks-cluster | EKS cluster name |
 | `node_instance_types` | ["t3.medium"] | Node instance types |
