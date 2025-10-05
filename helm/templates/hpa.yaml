@@ -9,4 +9,4 @@ spec:
   metrics:
     - type: Resource
       resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }
-+{{- end }}
+{{- end }}

@@ -69,13 +69,13 @@ resource "aws_security_group" "n8n" {
   }
 
   # ssh (tighten to your IP if preferred)
-  ingress {
-    description = "ssh"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+  # ingress {
+  #   description = "ssh"
+  #   from_port   = 22
+  #   to_port     = 22
+  #   protocol    = "tcp"
+  #   cidr_blocks = ["0.0.0.0/0"]
+  # }
 
   egress {
     description = "all egress"
@@ -146,7 +146,7 @@ resource "aws_ssm_parameter" "n8n_encryption_key" {
   name        = "/${local.project_tag}/encryptionKey"
   description = "n8n encryption key"
   type        = "SecureString"
-  value       = random_id.enc.b64_std
+  value       = var.n8n_encryption_key != "" ? var.n8n_encryption_key : random_id.enc.hex
   tags        = { Project = local.project_tag }
 }
 
@@ -180,16 +180,12 @@ resource "aws_instance" "n8n" {
     set -euxo pipefail
 
     yum update -y || true
-    dnf install -y docker
-    systemctl enable docker
-    systemctl start docker
+    dnf install -y docker || curl -fsSL https://get.docker.com | sh
+    systemctl enable docker && systemctl start docker
 
     dnf install -y awscli
-
-    # docker compose v2
-    curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" \
-      -o /usr/local/bin/docker-compose
-    chmod +x /usr/local/bin/docker-compose
+    dnf install -y docker-compose-plugin || true
+    docker compose version
 
     # fetch n8n encryption key from ssm
     ENC=$(aws ssm get-parameter \
@@ -224,7 +220,7 @@ resource "aws_instance" "n8n" {
     # inject ENC safely
     sed -i "s|__INJECT_ENC__|$${ENC}|g" /opt/n8n/docker-compose.yml
 
-    docker-compose -f /opt/n8n/docker-compose.yml up -d
+    docker compose -f /opt/n8n/docker-compose.yml up -d
   EOT
 
   tags = {
