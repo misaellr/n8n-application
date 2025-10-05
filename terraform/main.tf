@@ -7,7 +7,7 @@ terraform {
 }
 
 ########################################
-# provider
+# Providers
 ########################################
 provider "aws" {
   profile = var.aws_profile
@@ -15,27 +15,37 @@ provider "aws" {
 }
 
 ########################################
-# locals
+# Locals (single block)
 ########################################
 locals {
-  project_tag = var.project_tag
+  project_tag = "n8n-ec2"
 
-  # used by n8n to self-advertise external URLs
-  protocol = var.domain != "" ? "https" : "http"
+  # https if a domain is set, else http
+  protocol   = var.domain != "" ? "https" : "http"
+  # value used in Caddyfile host line
+  caddy_site = var.domain != "" ? var.domain : ":80"
 
-  # two env lines only when a domain is set, with correct YAML indentation
+  # Two env lines only when a domain is set, with correct YAML indentation
   webhook_env = var.domain != "" ? join("\n          ", [
     "WEBHOOK_URL: \"https://${var.domain}/\"",
     "N8N_PROXY_HOPS: \"1\"",
   ]) : ""
 }
 
-########################################
-# network: default vpc + subnets
-########################################
-data "aws_vpc" "default" {
-  default = true
+# Generate a key if one wasn't provided
+resource "random_id" "enc" {
+  byte_length = 32
 }
+
+locals {
+  # Use coalesce with nonsensitive to handle the conditional without marking issues
+  enc_key = coalesce(nonsensitive(var.n8n_encryption_key), random_id.enc.hex)
+}
+
+########################################
+# Default VPC + one subnet
+########################################
+data "aws_vpc" "default" { default = true }
 
 data "aws_subnets" "default" {
   filter {
@@ -45,40 +55,31 @@ data "aws_subnets" "default" {
 }
 
 ########################################
-# ami (amazon linux 2023 via ssm param)
-########################################
-data "aws_ssm_parameter" "al2023_ami" {
-  name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
-}
-
-########################################
-# security group
+# Security Group (80/443 in; all egress)
 ########################################
 resource "aws_security_group" "n8n" {
   name        = "${local.project_tag}-sg"
-  description = "n8n access"
+  description = "Allow HTTP/HTTPS"
   vpc_id      = data.aws_vpc.default.id
 
-  # http (container exposed on host:80)
   ingress {
-    description = "http"
+    description = "HTTP"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # ssh (tighten to your IP if preferred)
-  # ingress {
-  #   description = "ssh"
-  #   from_port   = 22
-  #   to_port     = 22
-  #   protocol    = "tcp"
-  #   cidr_blocks = ["0.0.0.0/0"]
-  # }
+  ingress {
+    description = "HTTPS"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 
   egress {
-    description = "all egress"
+    description = "All egress"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -89,7 +90,7 @@ resource "aws_security_group" "n8n" {
 }
 
 ########################################
-# iam: ec2 role with ssm + param store read
+# IAM for EC2 + SSM
 ########################################
 data "aws_iam_policy_document" "ec2_trust" {
   statement {
@@ -112,22 +113,19 @@ resource "aws_iam_role_policy_attachment" "ssm_core" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-# allow reading the secure encryption key parameter
-data "aws_iam_policy_document" "param_read" {
-  statement {
-    actions   = ["ssm:GetParameter"]
-    resources = [aws_ssm_parameter.n8n_encryption_key.arn]
-  }
-}
-
-resource "aws_iam_policy" "param_read" {
-  name   = "${local.project_tag}-param-read"
-  policy = data.aws_iam_policy_document.param_read.json
-}
-
-resource "aws_iam_role_policy_attachment" "param_read" {
-  role       = aws_iam_role.ec2_role.name
-  policy_arn = aws_iam_policy.param_read.arn
+# Allow reading the SecureString key
+resource "aws_iam_role_policy" "ssm_get_param" {
+  name = "allow-n8n-ssm-get-parameter"
+  role = aws_iam_role.ec2_role.id
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Sid      = "AllowGetParameter",
+      Effect   = "Allow",
+      Action   = ["ssm:GetParameter", "ssm:GetParameters"],
+      Resource = aws_ssm_parameter.n8n_encryption_key.arn
+    }]
+  })
 }
 
 resource "aws_iam_instance_profile" "ec2_profile" {
@@ -136,34 +134,36 @@ resource "aws_iam_instance_profile" "ec2_profile" {
 }
 
 ########################################
-# n8n encryption key -> ssm parameter
+# SSM Parameter for the encryption key
 ########################################
-resource "random_id" "enc" {
-  byte_length = 32
-}
-
 resource "aws_ssm_parameter" "n8n_encryption_key" {
-  name        = "/${local.project_tag}/encryptionKey"
-  description = "n8n encryption key"
-  type        = "SecureString"
-  value       = var.n8n_encryption_key != "" ? var.n8n_encryption_key : random_id.enc.hex
-  tags        = { Project = local.project_tag }
+  name  = "/n8n/encryption_key"
+  type  = "SecureString"
+  value = local.enc_key
+  tags  = { Project = local.project_tag }
 }
 
 ########################################
-# ec2 instance
+# AMI (Amazon Linux 2)
+########################################
+data "aws_ssm_parameter" "al2_ami" {
+  name = "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2"
+}
+
+########################################
+# EC2 Instance
 ########################################
 resource "aws_instance" "n8n" {
   depends_on = [aws_ssm_parameter.n8n_encryption_key]
 
-  ami                         = data.aws_ssm_parameter.al2023_ami.value
+  ami                         = data.aws_ssm_parameter.al2_ami.value
   instance_type               = var.instance_type
   subnet_id                   = element(data.aws_subnets.default.ids, 0)
   vpc_security_group_ids      = [aws_security_group.n8n.id]
   associate_public_ip_address = true
   iam_instance_profile        = aws_iam_instance_profile.ec2_profile.name
 
-  # enforce IMDSv2 + encrypt root
+  # Enforce IMDSv2 + encrypt root
   metadata_options {
     http_endpoint = "enabled"
     http_tokens   = "required"
@@ -179,58 +179,86 @@ resource "aws_instance" "n8n" {
     #!/bin/bash
     set -euxo pipefail
 
-    yum update -y || true
-    dnf install -y docker || curl -fsSL https://get.docker.com | sh
-    systemctl enable docker && systemctl start docker
+    yum update -y
+    amazon-linux-extras install -y docker
+    systemctl enable docker
+    systemctl start docker
 
-    dnf install -y awscli
-    dnf install -y docker-compose-plugin || true
-    docker compose version
+    # AWS CLI to fetch SSM parameter
+    yum install -y awscli
 
-    # fetch n8n encryption key from ssm
-    ENC=$(aws ssm get-parameter \
-      --name "/${local.project_tag}/encryptionKey" \
-      --with-decryption \
-      --query 'Parameter.Value' \
-      --output text \
-      --region ${var.region})
+    # docker-compose v2
+    curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" \
+      -o /usr/local/bin/docker-compose
+    chmod +x /usr/local/bin/docker-compose
 
-    mkdir -p /opt/n8n
-    cat > /opt/n8n/docker-compose.yml <<'YAML'
+    mkdir -p /opt/n8n && cd /opt/n8n
+
+    # Decrypt the key from SSM
+    ENC="$(aws ssm get-parameter --name /n8n/encryption_key --with-decryption --region ${var.region} --query 'Parameter.Value' --output text)"
+
+    # Compose file (unquoted heredoc so bash can expand $ENC variable)
+    cat > docker-compose.yml <<YAML
     version: "3.8"
     services:
       n8n:
         image: docker.n8n.io/n8nio/n8n:latest
         restart: unless-stopped
-        ports:
-          - "80:5678"
         environment:
           GENERIC_TIMEZONE: "${var.timezone}"
           TZ: "${var.timezone}"
-          N8N_ENCRYPTION_KEY: "__INJECT_ENC__"
+          N8N_ENCRYPTION_KEY: "$${ENC}"
           N8N_RUNNERS_ENABLED: "true"
           N8N_HOST: "${var.domain}"
           N8N_PROTOCOL: "${local.protocol}"
           N8N_PORT: "5678"
           ${local.webhook_env}
+          # N8N_BASIC_AUTH_ACTIVE: "true"
+          # N8N_BASIC_AUTH_USER: "admin"
+          # N8N_BASIC_AUTH_PASSWORD: "change-me"
         volumes:
-          - /opt/n8n/data:/home/node/.n8n
+          - ./n8n_data:/home/node/.n8n
+        expose:
+          - "5678"
+
+      caddy:
+        image: caddy:2
+        restart: unless-stopped
+        ports:
+          - "80:80"
+          - "443:443"
+        volumes:
+          - ./Caddyfile:/etc/caddy/Caddyfile
+          - caddy_data:/data
+          - caddy_config:/config
+        depends_on:
+          - n8n
+
+    volumes:
+      caddy_data: {}
+      caddy_config: {}
     YAML
 
-    # inject ENC safely
-    sed -i "s|__INJECT_ENC__|$${ENC}|g" /opt/n8n/docker-compose.yml
+    # Caddyfile
+    cat > Caddyfile <<CADDY
+    ${local.caddy_site} {
+      encode zstd gzip
+      reverse_proxy n8n:5678
+    }
+    CADDY
 
-    docker compose -f /opt/n8n/docker-compose.yml up -d
+    mkdir -p /opt/n8n/n8n_data
+    chown -R 1000:1000 /opt/n8n/n8n_data
+
+    /usr/local/bin/docker-compose pull
+    /usr/local/bin/docker-compose up -d
   EOT
 
-  tags = {
-    Name    = local.project_tag
-    Project = local.project_tag
-  }
+  tags = { Name = local.project_tag, Project = local.project_tag }
 }
 
 ########################################
-# elastic ip for stable dns
+# Elastic IP for stable DNS
 ########################################
 resource "aws_eip" "n8n" {
   domain = "vpc"
