@@ -303,89 +303,114 @@ The following are explicitly **out of scope**:
 #### FR-7: TLS/Certificate Management
 
 **Priority**: MUST HAVE
-**User Story**: As a user, I want flexible TLS configuration options during initial deployment and the ability to update certificates later.
+**User Story**: As a user, I want flexible TLS configuration options as a post-deployment step to avoid race conditions with certificate validation.
 
 **Requirements**:
 
-**Initial Deployment Options:**
+**4-Phase Deployment Workflow:**
 
-1. **Option 1: No TLS (Public IP only)**
-   - Deploy with Network Load Balancer and public IP
-   - Access n8n via `http://<load-balancer-dns>` or `http://<elastic-ip>`
-   - No domain required
-   - No certificate configuration
-   - HTTPS disabled on ingress
+TLS configuration is handled in **Phase 4** (post-deployment) to prevent race conditions with Let's Encrypt validation:
 
-2. **Option 2: TLS with Domain (Bring Your Own Certificate)**
-   - User provides domain name (FQDN)
+1. **Phase 1**: Terraform deploys infrastructure (VPC, EKS, NGINX ingress)
+2. **Phase 2**: Helm deploys n8n application with HTTP only
+3. **Phase 3**: LoadBalancer URL is retrieved and displayed
+4. **Phase 4**: Optional interactive TLS configuration
+
+**Initial Deployment (Phases 1-3):**
+- n8n is **always deployed with HTTP initially** (no TLS)
+- Access n8n via LoadBalancer DNS: `http://<load-balancer-dns>`
+- No TLS configuration during infrastructure deployment
+- Prevents cert-manager from requesting certificates before LoadBalancer exists
+
+**Phase 4: Post-Deployment TLS Configuration**
+
+After the LoadBalancer is ready, users are prompted: **"Would you like to configure TLS/HTTPS now?"**
+
+If **Yes**, two options are available:
+
+1. **Option 1: Bring Your Own Certificate**
    - User provides TLS certificate and private key (PEM format)
    - Setup validates certificate format
-   - Certificate stored as Kubernetes Secret
-   - Ingress configured with TLS enabled
+   - Certificate stored as Kubernetes Secret (`n8n-tls`)
+   - n8n Helm release upgraded with `tls.enabled=true`
    - Access n8n via `https://<your-domain>`
 
-3. **Option 3: TLS with Domain (Auto-generated via Let's Encrypt)**
-   - User provides domain name (FQDN)
-   - Setup deploys cert-manager to cluster
+2. **Option 2: Let's Encrypt (Auto-generated)**
+   - **Critical**: LoadBalancer DNS is displayed to user
+   - Setup instructs: "Configure DNS to point `<your-domain>` to `<load-balancer-dns>`"
+   - User **must confirm DNS is configured** before proceeding
+   - Setup deploys cert-manager via Helm
    - Setup creates ClusterIssuer for Let's Encrypt (HTTP-01 validation)
-   - Certificate automatically requested and validated
+   - n8n Helm release upgraded with TLS and cert-manager annotations
+   - Let's Encrypt validates domain ownership via HTTP-01
+   - Certificate issued (~2-5 minutes)
    - Certificate auto-renewed before expiration
-   - Ingress configured with TLS enabled and cert-manager annotations
    - Access n8n via `https://<your-domain>`
+
+If **No** (skip TLS):
+- User can configure TLS later using `python3 setup.py --configure-tls` (feature planned)
+- User can manually configure TLS using Helm upgrade commands
 
 **Post-Deployment Certificate Updates:**
 
-The tool must support updating TLS configuration after initial deployment:
+The tool must support updating TLS configuration after deployment:
 
-1. **Add TLS to existing non-TLS deployment**
-   - Re-run setup.py with `--update-tls` flag
+1. **Add TLS to existing HTTP-only deployment**
+   - Re-run setup.py with `--configure-tls` flag (planned)
    - Prompt for domain and certificate option
-   - Update ingress configuration
+   - Update n8n Helm release with TLS enabled
    - No downtime required (rolling update)
 
 2. **Update existing certificates (BYO)**
-   - Re-run setup.py with `--update-tls` flag
-   - Provide new certificate and private key
-   - Update Kubernetes Secret
+   - Update Kubernetes Secret with new certificate
    - Ingress automatically picks up new certificate
    - No pod restart required
 
 3. **Switch from BYO to Let's Encrypt (or vice versa)**
-   - Re-run setup.py with `--update-tls` flag
-   - Select new certificate option
-   - Update ingress annotations and secrets
+   - Remove old certificate resources
+   - Configure new certificate option
+   - Update n8n Helm release
    - Minimal downtime during certificate switch
 
 **Technical Implementation:**
 
-- **Elastic IP Allocation**: NLB created with static Elastic IP for consistent DNS mapping
-- **Cert-Manager Integration**: Deploy cert-manager v1.13+ via Helm (if auto-generation selected)
-- **ClusterIssuer Configuration**: HTTP-01 challenge via ingress
+- **LoadBalancer**: NGINX ingress creates Network Load Balancer (NLB) automatically
+- **DNS Confirmation**: Required before Let's Encrypt proceeds (prevents HTTP-01 validation failures)
+- **Cert-Manager Integration**: Deployed via Helm in Phase 4 (version 1.13.3)
+- **ClusterIssuer Configuration**: HTTP-01 challenge via ingress class nginx
 - **Certificate Storage**: Kubernetes TLS secrets in n8n namespace
-- **Ingress TLS Configuration**:
-  - `tls.enabled: true/false` based on user choice
-  - `tls.secretName` pointing to certificate secret
-  - cert-manager annotations if using Let's Encrypt
-- **DNS Validation**: Warn user that DNS must point to NLB IP before Let's Encrypt validation
-- **Certificate Monitoring**: Use cert-manager's auto-renewal (30 days before expiration)
+- **Helm Upgrade Strategy**:
+  - Initial deploy: `helm install n8n ./helm --set ingress.tls.enabled=false`
+  - TLS upgrade: `helm upgrade n8n ./helm --reuse-values --set ingress.tls.enabled=true`
+- **Certificate Monitoring**: cert-manager auto-renewal (30 days before expiration)
+- **Race Condition Prevention**: LoadBalancer must exist and DNS must resolve before certificate request
 
 **Acceptance Criteria**:
 
-**Initial Deployment:**
-- [ ] User can deploy without domain/TLS (Option 1)
-- [ ] User can deploy with BYO certificates (Option 2)
-- [ ] User can deploy with Let's Encrypt auto-generation (Option 3)
-- [ ] Certificate validation catches invalid PEM format
-- [ ] Let's Encrypt HTTP-01 challenge completes successfully
-- [ ] Ingress serves traffic over HTTPS when TLS enabled
-- [ ] Access via HTTP redirects to HTTPS when TLS enabled
+**Initial Deployment (HTTP only):**
+- [x] Phase 1 completes: Infrastructure deployed via Terraform
+- [x] Phase 2 completes: n8n deployed via Helm with HTTP only
+- [x] Phase 3 completes: LoadBalancer URL retrieved and displayed
+- [x] No TLS configuration during Phases 1-3
+- [x] User can access n8n via HTTP at LoadBalancer URL
+
+**Phase 4: TLS Configuration:**
+- [ ] User prompted for TLS configuration after LoadBalancer is ready
+- [ ] User can skip TLS configuration
+- [ ] BYO certificate option validates PEM format
+- [ ] Let's Encrypt option displays LoadBalancer URL for DNS configuration
+- [ ] Let's Encrypt option requires DNS confirmation before proceeding
+- [ ] cert-manager installed only if Let's Encrypt selected
+- [ ] n8n Helm release upgraded with TLS enabled
+- [ ] HTTP-01 validation completes successfully
+- [ ] Certificate issued and ingress serves HTTPS traffic
+- [ ] Access via HTTPS works with valid certificate
 
 **Certificate Updates:**
-- [ ] User can add TLS to existing non-TLS deployment
+- [ ] User can configure TLS using `--configure-tls` flag (planned)
 - [ ] User can update BYO certificates without downtime
-- [ ] User can switch between BYO and Let's Encrypt
+- [ ] User can manually switch between BYO and Let's Encrypt
 - [ ] Certificate updates don't require pod restarts
-- [ ] Old certificates are backed up before replacement
 
 **Error Handling:**
 - [ ] Invalid certificate format rejected with clear error
