@@ -151,3 +151,5 @@ Session.vim
 # OS generated files
 .DS_Store*
 Icon?
+# Documentation
+AGENTS.md
