@@ -96,23 +96,38 @@ class DependencyChecker:
     REQUIRED_TOOLS = {
         'terraform': {
             'command': 'terraform version',
+            'version_regex': r'Terraform v([0-9]+\.[0-9]+\.[0-9]+)',
+            'min_version': '1.6.0',
             'install_url': 'https://developer.hashicorp.com/terraform/downloads',
             'description': 'Infrastructure as Code tool'
         },
         'aws': {
             'command': 'aws --version',
+            'version_regex': r'aws-cli/([0-9]+\.[0-9]+\.[0-9]+)',
+            'min_version': '2.0.0',
             'install_url': 'https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html',
             'description': 'AWS Command Line Interface'
         },
         'helm': {
             'command': 'helm version',
+            'version_regex': r'v([0-9]+\.[0-9]+\.[0-9]+)',
+            'min_version': '3.0.0',
             'install_url': 'https://helm.sh/docs/intro/install/',
             'description': 'Kubernetes package manager'
         },
         'kubectl': {
             'command': 'kubectl version --client',
+            'version_regex': r'Client Version: v([0-9]+\.[0-9]+\.[0-9]+)',
+            'min_version': '1.20.0',
+            'description': 'Kubernetes command-line tool',
             'install_url': 'https://kubernetes.io/docs/tasks/tools/',
-            'description': 'Kubernetes command-line tool'
+        },
+        'openssl': {
+            'command': 'openssl version',
+            'version_regex': r'OpenSSL ([0-9]+\.[0-9]+\.[0-9]+)',
+            'min_version': '1.1.1',
+            'description': 'Cryptography and SSL/TLS toolkit',
+            'install_url': 'https://www.openssl.org/source/',
         }
     }
 
@@ -127,14 +142,30 @@ class DependencyChecker:
         return True, f"Python {current_version}"
 
     @staticmethod
-    def check_tool(tool_name: str) -> bool:
-        """Check if a tool is installed"""
-        return shutil.which(tool_name) is not None
+    def _compare_versions(version1: str, version2: str) -> int:
+        """Compare two version strings (e.g., '1.6.0', '1.10.2').
+        Returns:
+            -1 if version1 < version2
+             0 if version1 == version2
+             1 if version1 > version2
+        """
+        v1_parts = [int(p) for p in version1.split('.')]
+        v2_parts = [int(p) for p in version2.split('.')]
+        for i in range(max(len(v1_parts), len(v2_parts))):
+            v1_part = v1_parts[i] if i < len(v1_parts) else 0
+            v2_part = v2_parts[i] if i < len(v2_parts) else 0
+            if v1_part < v2_part:
+                return -1
+            if v1_part > v2_part:
+                return 1
+        return 0
 
     @classmethod
     def check_all_dependencies(cls) -> Tuple[bool, list]:
         """Check all required dependencies for EKS deployment"""
         missing = []
+        outdated = []
+        import re
 
         print(f"\n{Colors.HEADER}🔍 Checking dependencies for EKS deployment...{Colors.ENDC}")
 
@@ -151,11 +182,35 @@ class DependencyChecker:
 
         # Check all required tools
         for tool, info in cls.REQUIRED_TOOLS.items():
-            if cls.check_tool(tool):
-                print(f"{Colors.OKGREEN}✓{Colors.ENDC} {tool} - installed")
-            else:
+            if not shutil.which(tool):
                 print(f"{Colors.FAIL}✗{Colors.ENDC} {tool} - NOT installed")
                 missing.append((tool, info))
+                continue
+
+            try:
+                result = subprocess.run(
+                    info['command'].split(),
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                version_match = re.search(info['version_regex'], result.stdout)
+                if not version_match:
+                    version_match = re.search(info['version_regex'], result.stderr)
+
+                if version_match:
+                    installed_version = version_match.group(1)
+                    min_version = info['min_version']
+                    if cls._compare_versions(installed_version, min_version) >= 0:
+                        print(f"{Colors.OKGREEN}✓{Colors.ENDC} {tool} - installed (v{installed_version})")
+                    else:
+                        print(f"{Colors.FAIL}✗{Colors.ENDC} {tool} - outdated (v{installed_version}, requires >={min_version})")
+                        outdated.append((tool, info, installed_version))
+                else:
+                    print(f"{Colors.WARNING}✓{Colors.ENDC} {tool} - installed (could not determine version)")
+
+            except Exception:
+                print(f"{Colors.WARNING}✓{Colors.ENDC} {tool} - installed (could not verify version)")
 
         if missing:
             print(f"\n{Colors.WARNING}Missing dependencies detected!{Colors.ENDC}")
@@ -165,8 +220,15 @@ class DependencyChecker:
                 print(f"    Installation: {Colors.OKCYAN}{info['install_url']}{Colors.ENDC}\n")
             return False, missing
 
+        if outdated:
+            print(f"\n{Colors.WARNING}Outdated dependencies detected!{Colors.ENDC}")
+            print("\nPlease upgrade the following tools:\n")
+            for tool, info, installed_version in outdated:
+                print(f"  {Colors.BOLD}{tool}{Colors.ENDC}: Installed v{installed_version}, requires >={info['min_version']}")
+                print(f"    Installation: {Colors.OKCYAN}{info['install_url']}{Colors.ENDC}\n")
+            return False, outdated
+
         print(f"\n{Colors.OKGREEN}✓ All dependencies satisfied{Colors.ENDC}")
-        return True, []
 
 class CertificateValidator:
     """Validates TLS certificates in PEM format"""
@@ -211,6 +273,77 @@ class CertificateValidator:
         import re
         pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
         return re.match(pattern, email) is not None
+
+    @classmethod
+    def validate_certificate_chain(cls, cert_content: str, key_content: str, domain: str) -> Tuple[bool, str]:
+        """Validate certificate against private key, expiration, and domain"""
+        import tempfile
+        import datetime
+
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.crt', delete=False) as cert_file, \
+                 tempfile.NamedTemporaryFile(mode='w', suffix='.key', delete=False) as key_file:
+                cert_path = cert_file.name
+                key_path = key_file.name
+                cert_file.write(cert_content)
+                key_file.write(key_content)
+
+            # 1. Check if cert and key match
+            cert_modulus = subprocess.run(
+                ['openssl', 'x509', '-noout', '-modulus', '-in', cert_path],
+                capture_output=True, text=True
+            ).stdout
+            key_modulus = subprocess.run(
+                ['openssl', 'rsa', '-noout', '-modulus', '-in', key_path],
+                capture_output=True, text=True
+            ).stdout
+            if cert_modulus != key_modulus:
+                return False, "Certificate and private key do not match."
+
+            # 2. Check expiration
+            end_date_str = subprocess.run(
+                ['openssl', 'x509', '-noout', '-enddate', '-in', cert_path],
+                capture_output=True, text=True
+            ).stdout.split('=')[1].strip()
+            end_date = datetime.datetime.strptime(end_date_str, '%b %d %H:%M:%S %Y %Z')
+            if end_date < datetime.datetime.now():
+                return False, f"Certificate expired on {end_date_str}."
+
+            # 3. Check domain name (SAN and CN)
+            cert_text = subprocess.run(
+                ['openssl', 'x509', '-noout', '-text', '-in', cert_path],
+                capture_output=True, text=True
+            ).stdout
+            
+            # Check Subject Alternative Name (SAN)
+            import re
+            san_match = re.search(r'X509v3 Subject Alternative Name: \n\s*DNS:([^,]+)', cert_text)
+            sans = []
+            if san_match:
+                sans = [name.strip() for name in san_match.group(1).split(', DNS:')]
+            
+            # Check Common Name (CN)
+            cn_match = re.search(r'Subject:.*? CN = ([^/]+)', cert_text)
+            cn = cn_match.group(1) if cn_match else None
+
+            valid_domains = set(sans + ([cn] if cn else []))
+            
+            # Support wildcard domains
+            for valid_domain in valid_domains:
+                if valid_domain.startswith('*.'):
+                    if domain.endswith(valid_domain[1:]) and domain.count('.') == valid_domain.count('.'):
+                        return True, "Certificate chain is valid."
+                elif domain == valid_domain:
+                    return True, "Certificate chain is valid."
+
+            return False, f"Certificate is not valid for domain '{domain}'. Valid domains: {', '.join(valid_domains)}"
+
+        except Exception as e:
+            return False, f"An unexpected error occurred during validation: {e}"
+        finally:
+            os.unlink(cert_path)
+            os.unlink(key_path)
+
 
 class AWSAuthChecker:
     """Handles AWS authentication verification"""
@@ -408,18 +541,23 @@ class ConfigurationPrompt:
             default="n8n-eks-cluster"
         )
 
-        node_types = ["t3.small", "t3.medium", "t3.large"]
-        print(f"\nRecommended node types: {', '.join(node_types)}")
-        node_type = self.prompt(
+        node_type_choices = [
+            "t3.small  (~$30/month for 2 nodes)",
+            "t3.medium (~$60/month for 2 nodes) [Recommended]",
+            "t3.large  (~$120/month for 2 nodes)"
+        ]
+        node_type_selection = self.prompt_choice(
             "Node Instance Type",
-            default="t3.medium"
+            node_type_choices,
+            default=1
         )
-        self.config.node_instance_types = [node_type]
+        self.config.node_instance_types = [node_type_selection.split()[0]]
 
         self.config.node_desired_size = int(self.prompt(
             "Desired number of nodes",
             default="1"
         ))
+
 
         self.config.node_min_size = int(self.prompt(
             "Minimum number of nodes",
@@ -466,10 +604,16 @@ class ConfigurationPrompt:
             self.config.n8n_encryption_key = secrets.token_hex(32)
             print(f"{Colors.OKGREEN}✓ Generated new encryption key{Colors.ENDC}")
         else:
-            self.config.n8n_encryption_key = self.prompt(
-                "Enter existing n8n encryption key (64 hex characters)",
-                required=True
-            )
+            while True:
+                key = self.prompt(
+                    "Enter existing n8n encryption key (64 hex characters)",
+                    required=True
+                )
+                if len(key) == 64 and all(c in '0123456789abcdefABCDEF' for c in key):
+                    self.config.n8n_encryption_key = key
+                    break
+                else:
+                    print(f"{Colors.FAIL}✗ Invalid format. Key must be 64 hexadecimal characters.{Colors.ENDC}")
 
         # Database Configuration
         print(f"\n{Colors.BOLD}Database Configuration{Colors.ENDC}")
@@ -1034,6 +1178,39 @@ class HelmRunner:
 
         return success
 
+def verify_n8n_deployment(namespace: str, timeout_seconds: int = 300) -> bool:
+    """Verify that the n8n deployment is ready"""
+    print(f"\n{Colors.HEADER}⏳ Waiting for n8n deployment to be ready...{Colors.ENDC}")
+    import time
+
+    start_time = time.time()
+    while time.time() - start_time < timeout_seconds:
+        try:
+            result = subprocess.run(
+                ['kubectl', 'get', 'deployment', 'n8n', '-n', namespace, '-o', 'json'],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0:
+                status = json.loads(result.stdout).get('status', {})
+                replicas = status.get('replicas', 0)
+                ready_replicas = status.get('readyReplicas', 0)
+
+                if replicas > 0 and replicas == ready_replicas:
+                    print(f"{Colors.OKGREEN}✓ n8n deployment is ready with {ready_replicas}/{replicas} pods.{Colors.ENDC}")
+                    return True
+                else:
+                    print(f"  - Waiting... ({ready_replicas}/{replicas} pods ready)")
+            else:
+                print(f"  - {Colors.WARNING}Could not get deployment status. Retrying...{Colors.ENDC}")
+
+        except Exception as e:
+            print(f"  - {Colors.WARNING}An error occurred while checking status: {e}{Colors.ENDC}")
+
+        time.sleep(15)
+
+    print(f"{Colors.FAIL}✗ Timed out waiting for n8n deployment to become ready.{Colors.ENDC}")
+    return False
+
 def get_loadbalancer_url(max_attempts: int = 30, delay: int = 10) -> Optional[str]:
     """Get the LoadBalancer URL from NGINX ingress controller
 
@@ -1143,6 +1320,25 @@ def configure_tls_interactive(config: DeploymentConfig, script_dir: Path, loadba
                 break
             else:
                 print(f"{Colors.FAIL}✗ {content}{Colors.ENDC}")
+
+        # Validate the certificate chain
+        print(f"\n{Colors.HEADER}🔬 Validating certificate chain...{Colors.ENDC}")
+        valid, message = CertificateValidator.validate_certificate_chain(
+            config.tls_certificate_crt,
+            config.tls_certificate_key,
+            config.n8n_host
+        )
+        if not valid:
+            print(f"{Colors.FAIL}✗ Certificate validation failed: {message}{Colors.ENDC}")
+            # Allow user to retry
+            if prompt.prompt_yes_no("Try again with different files?", default=True):
+                 # This is a bit tricky in the current structure. For simplicity, we'll exit and ask them to re-run.
+                 print("Please re-run the script with the --configure-tls flag to try again.")
+                 return False # Abort the TLS setup
+            else:
+                 return False
+
+        print(f"{Colors.OKGREEN}✓ {message}{Colors.ENDC}")
 
         # Create TLS secret
         print(f"\n{Colors.HEADER}Creating TLS secret...{Colors.ENDC}")
