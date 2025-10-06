@@ -1415,22 +1415,36 @@ def configure_tls_interactive(config: DeploymentConfig, script_dir: Path, loadba
             print("Configure DNS and run setup with --configure-tls when ready")
             return False
 
-        # Install cert-manager
+        # Install cert-manager (check if already installed)
         print(f"\n{Colors.HEADER}Installing cert-manager...{Colors.ENDC}")
         try:
-            result = subprocess.run([
-                'helm', 'install', 'cert-manager', 'https://charts.jetstack.io/charts/cert-manager-v1.13.3.tgz',
-                '--namespace', 'cert-manager',
-                '--create-namespace',
-                '--set', 'installCRDs=true'
-            ], capture_output=True, text=True, timeout=180)
+            # Check if cert-manager is already installed
+            check_result = subprocess.run([
+                'helm', 'list', '-n', 'cert-manager', '-o', 'json'
+            ], capture_output=True, text=True, timeout=30)
 
-            if result.returncode == 0:
-                print(f"{Colors.OKGREEN}✓ cert-manager installed{Colors.ENDC}")
+            cert_manager_installed = False
+            if check_result.returncode == 0:
+                releases = json.loads(check_result.stdout)
+                cert_manager_installed = any(r.get('name') == 'cert-manager' for r in releases)
+
+            if cert_manager_installed:
+                print(f"{Colors.OKGREEN}✓ cert-manager already installed{Colors.ENDC}")
             else:
-                print(f"{Colors.FAIL}✗ cert-manager installation failed{Colors.ENDC}")
-                print(result.stderr)
-                return False
+                # Install cert-manager
+                result = subprocess.run([
+                    'helm', 'install', 'cert-manager', 'https://charts.jetstack.io/charts/cert-manager-v1.13.3.tgz',
+                    '--namespace', 'cert-manager',
+                    '--create-namespace',
+                    '--set', 'installCRDs=true'
+                ], capture_output=True, text=True, timeout=180)
+
+                if result.returncode == 0:
+                    print(f"{Colors.OKGREEN}✓ cert-manager installed{Colors.ENDC}")
+                else:
+                    print(f"{Colors.FAIL}✗ cert-manager installation failed{Colors.ENDC}")
+                    print(result.stderr)
+                    return False
 
         except Exception as e:
             print(f"{Colors.FAIL}✗ Error installing cert-manager: {e}{Colors.ENDC}")
@@ -1665,6 +1679,27 @@ def configure_basic_auth_interactive(config: DeploymentConfig, script_dir: Path,
     except Exception as e:
         print(f"{Colors.FAIL}✗ Error enabling basic auth: {e}{Colors.ENDC}")
         return False
+
+    # Update configuration state
+    config.enable_basic_auth = True
+
+    # Update terraform.tfvars to track basic auth state for proper cleanup
+    try:
+        tfvars_path = script_dir / "terraform" / "terraform.tfvars"
+        if tfvars_path.exists():
+            content = tfvars_path.read_text()
+            # Update enable_basic_auth value
+            import re
+            content = re.sub(
+                r'enable_basic_auth\s*=\s*(true|false)',
+                'enable_basic_auth  = true',
+                content
+            )
+            tfvars_path.write_text(content)
+            print(f"{Colors.OKGREEN}✓ Updated terraform.tfvars with basic auth state{Colors.ENDC}")
+    except Exception as e:
+        print(f"{Colors.WARNING}⚠ Could not update terraform.tfvars: {e}{Colors.ENDC}")
+        print(f"{Colors.WARNING}  Basic auth is enabled but not tracked in Terraform state{Colors.ENDC}")
 
     print(f"\n{Colors.OKGREEN}{Colors.BOLD}✅ Basic Authentication Configured!{Colors.ENDC}")
     print("\n" + "=" * 60)
