@@ -633,7 +633,7 @@ The tool must support updating TLS configuration after deployment:
 - Generate `terraform.tfvars` with user configuration
 - Run `terraform plan` and show summary
 - Prompt user to confirm plan
-- Run `terraform apply` with auto-approve after confirmation
+- Run `terraform apply` and rely on its interactive confirmation prompt
 - Stream Terraform output in real-time
 - Handle Terraform errors gracefully
 - Display Terraform outputs after successful apply
