@@ -59,7 +59,7 @@ provider "helm" {
 ########################################
 locals {
   project_tag = var.project_tag
-  azs         = slice(data.aws_availability_zones.available.names, 0, 3)
+  azs         = slice(data.aws_availability_zones.available.names, 0, min(3, length(data.aws_availability_zones.available.names)))
 }
 
 # Generate encryption key if not provided
@@ -271,6 +271,62 @@ resource "aws_eks_cluster" "main" {
 }
 
 ########################################
+# EKS Node Group Security Group
+########################################
+resource "aws_security_group" "eks_nodes" {
+  name        = "${local.project_tag}-eks-nodes-sg"
+  description = "Security group for EKS worker nodes"
+  vpc_id      = aws_vpc.main.id
+
+  egress {
+    description = "Allow all outbound traffic"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name                                        = "${local.project_tag}-eks-nodes-sg"
+    Project                                     = local.project_tag
+    "kubernetes.io/cluster/${var.cluster_name}" = "owned"
+  }
+}
+
+# Allow nodes to communicate with each other
+resource "aws_security_group_rule" "node_to_node" {
+  description              = "Allow nodes to communicate with each other"
+  type                     = "ingress"
+  from_port                = 0
+  to_port                  = 65535
+  protocol                 = "-1"
+  security_group_id        = aws_security_group.eks_nodes.id
+  source_security_group_id = aws_security_group.eks_nodes.id
+}
+
+# Allow nodes to receive traffic from cluster control plane
+resource "aws_security_group_rule" "cluster_to_node" {
+  description              = "Allow cluster control plane to communicate with nodes"
+  type                     = "ingress"
+  from_port                = 1025
+  to_port                  = 65535
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.eks_nodes.id
+  source_security_group_id = aws_eks_cluster.main.vpc_config[0].cluster_security_group_id
+}
+
+# Allow nodes to communicate with cluster API
+resource "aws_security_group_rule" "node_to_cluster" {
+  description              = "Allow nodes to communicate with cluster API"
+  type                     = "ingress"
+  from_port                = 443
+  to_port                  = 443
+  protocol                 = "tcp"
+  security_group_id        = aws_eks_cluster.main.vpc_config[0].cluster_security_group_id
+  source_security_group_id = aws_security_group.eks_nodes.id
+}
+
+########################################
 # EKS Node Group IAM Role
 ########################################
 data "aws_iam_policy_document" "node_assume_role" {
@@ -352,6 +408,7 @@ resource "aws_eks_node_group" "main" {
     aws_iam_role_policy_attachment.node_cni_policy,
     aws_iam_role_policy_attachment.node_registry_policy,
     aws_iam_role_policy_attachment.node_ssm_policy,
+    aws_security_group.eks_nodes,
   ]
 
   tags = {
@@ -472,6 +529,19 @@ data "aws_ssm_parameter" "n8n_encryption_key" {
 }
 
 ########################################
+# Elastic IPs for NLB (Static IP addresses)
+########################################
+resource "aws_eip" "nlb" {
+  count  = var.enable_nginx_ingress ? length(local.azs) : 0
+  domain = "vpc"
+
+  tags = {
+    Name    = "${local.project_tag}-nlb-eip-${local.azs[count.index]}"
+    Project = local.project_tag
+  }
+}
+
+########################################
 # NGINX Ingress Controller (optional)
 ########################################
 resource "helm_release" "nginx_ingress" {
@@ -495,10 +565,136 @@ resource "helm_release" "nginx_ingress" {
     value = "nlb"
   }
 
+  # Attach static Elastic IPs to the NLB
+  set {
+    name  = "controller.service.annotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-eip-allocations"
+    value = join(",", aws_eip.nlb[*].id)
+  }
+
+  # Specify public subnets for the NLB
+  set {
+    name  = "controller.service.annotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-subnets"
+    value = join(",", aws_subnet.public[*].id)
+  }
+
   depends_on = [
     aws_eks_node_group.main,
     aws_eks_addon.ebs_csi,
+    aws_eip.nlb,
   ]
+}
+
+########################################
+# RDS PostgreSQL (Optional - only when database_type = postgresql)
+########################################
+resource "random_password" "rds_password" {
+  count   = var.database_type == "postgresql" ? 1 : 0
+  length  = 32
+  special = true
+}
+
+resource "aws_db_subnet_group" "n8n" {
+  count      = var.database_type == "postgresql" ? 1 : 0
+  name       = "${local.project_tag}-db-subnet-group"
+  subnet_ids = aws_subnet.private[*].id
+
+  tags = {
+    Name    = "${local.project_tag}-db-subnet-group"
+    Project = local.project_tag
+  }
+}
+
+resource "aws_security_group" "rds" {
+  count       = var.database_type == "postgresql" ? 1 : 0
+  name        = "${local.project_tag}-rds-sg"
+  description = "Security group for RDS PostgreSQL"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description     = "PostgreSQL from EKS worker nodes"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.eks_nodes.id]
+  }
+
+  egress {
+    description = "Allow all outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name    = "${local.project_tag}-rds-sg"
+    Project = local.project_tag
+  }
+}
+
+resource "aws_db_instance" "n8n" {
+  count                  = var.database_type == "postgresql" ? 1 : 0
+  identifier             = "${local.project_tag}-postgres"
+  engine                 = "postgres"
+  engine_version         = "15.4"
+  instance_class         = var.rds_instance_class
+  allocated_storage      = var.rds_allocated_storage
+  storage_type           = "gp3"
+  storage_encrypted      = true
+  db_name                = var.rds_database_name
+  username               = var.rds_username
+  password               = random_password.rds_password[0].result
+  db_subnet_group_name   = aws_db_subnet_group.n8n[0].name
+  vpc_security_group_ids = [aws_security_group.rds[0].id]
+  multi_az               = var.rds_multi_az
+  skip_final_snapshot    = true
+  backup_retention_period = 7
+  backup_window          = "03:00-04:00"
+  maintenance_window     = "mon:04:00-mon:05:00"
+
+  tags = {
+    Name    = "${local.project_tag}-postgres"
+    Project = local.project_tag
+  }
+}
+
+########################################
+# AWS Secrets Manager
+########################################
+# Store RDS credentials (only when using PostgreSQL)
+resource "aws_secretsmanager_secret" "db_credentials" {
+  count       = var.database_type == "postgresql" ? 1 : 0
+  name        = "/n8n/db-credentials"
+  description = "RDS PostgreSQL credentials for n8n"
+
+  tags = {
+    Project = local.project_tag
+  }
+}
+
+resource "aws_secretsmanager_secret_version" "db_credentials" {
+  count     = var.database_type == "postgresql" ? 1 : 0
+  secret_id = aws_secretsmanager_secret.db_credentials[0].id
+  secret_string = jsonencode({
+    username = var.rds_username
+    password = random_password.rds_password[0].result
+    engine   = "postgres"
+    host     = aws_db_instance.n8n[0].endpoint
+    port     = 5432
+    dbname   = var.rds_database_name
+  })
+}
+
+# Store basic auth credentials (only when basic auth is enabled)
+# Note: This is a placeholder - actual credentials are generated and stored by setup.py in Phase 4
+resource "aws_secretsmanager_secret" "basic_auth" {
+  count       = var.enable_basic_auth ? 1 : 0
+  name        = "/n8n/basic-auth"
+  description = "Basic authentication credentials for n8n ingress"
+
+  tags = {
+    Project = local.project_tag
+  }
 }
 
 ########################################

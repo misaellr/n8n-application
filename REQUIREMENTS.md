@@ -322,9 +322,13 @@ TLS configuration is handled in **Phase 4** (post-deployment) to prevent race co
 - No TLS configuration during infrastructure deployment
 - Prevents cert-manager from requesting certificates before LoadBalancer exists
 
-**Phase 4: Post-Deployment TLS Configuration**
+**Phase 4: Post-Deployment Configuration (TLS & Basic Auth)**
 
-After the LoadBalancer is ready, users are prompted: **"Would you like to configure TLS/HTTPS now?"**
+After the LoadBalancer is ready, users are prompted for post-deployment configuration:
+
+**Step 1: TLS Configuration**
+
+Users are prompted: **"Would you like to configure TLS/HTTPS now?"**
 
 If **Yes**, two options are available:
 
@@ -351,6 +355,24 @@ If **No** (skip TLS):
 - User can configure TLS later using `python3 setup.py --configure-tls` (feature planned)
 - User can manually configure TLS using Helm upgrade commands
 
+**Step 2: Basic Authentication Configuration**
+
+After TLS configuration (or if TLS is skipped), users are prompted: **"Would you like to enable basic authentication for the application?"**
+
+If **Yes**:
+- Setup auto-generates basic auth credentials:
+  - Username: `admin`
+  - Password: 12 random alphanumeric characters
+- Credentials are stored in AWS Secrets Manager (`/n8n/basic-auth`)
+- Credentials are displayed to user (must save them)
+- Ingress is updated with basic auth configuration (nginx auth annotations)
+- Basic auth protects both HTTP and HTTPS access to n8n
+- User must authenticate before accessing n8n web interface
+
+If **No** (skip basic auth):
+- n8n is publicly accessible via LoadBalancer URL
+- User can enable basic auth later (feature planned)
+
 **Post-Deployment Certificate Updates:**
 
 The tool must support updating TLS configuration after deployment:
@@ -374,16 +396,22 @@ The tool must support updating TLS configuration after deployment:
 
 **Technical Implementation:**
 
-- **LoadBalancer**: NGINX ingress creates Network Load Balancer (NLB) automatically
+- **LoadBalancer**: NGINX ingress creates Network Load Balancer (NLB) with static Elastic IPs automatically
+- **Static Elastic IPs**: Three EIPs allocated (one per AZ) and attached to NLB for consistent DNS A-record mapping
+- **Namespace Configuration**: All kubectl/helm operations honor the user-configured namespace (default: n8n)
 - **DNS Confirmation**: Required before Let's Encrypt proceeds (prevents HTTP-01 validation failures)
 - **Cert-Manager Integration**: Deployed via Helm in Phase 4 (version 1.13.3)
 - **ClusterIssuer Configuration**: HTTP-01 challenge via ingress class nginx
-- **Certificate Storage**: Kubernetes TLS secrets in n8n namespace
+- **Certificate Storage**: Kubernetes TLS secrets in configured namespace
 - **Helm Upgrade Strategy**:
-  - Initial deploy: `helm install n8n ./helm --set ingress.tls.enabled=false`
+  - Initial deploy: `helm install n8n ./helm --set ingress.tls.enabled=false --set persistence.size=<configured>`
+  - Deployment readiness: `kubectl wait --for=condition=available deployment/n8n` (5-minute timeout)
   - TLS upgrade: `helm upgrade n8n ./helm --reuse-values --set ingress.tls.enabled=true`
+  - Basic Auth upgrade: `helm upgrade n8n ./helm --reuse-values --set ingress.basicAuth.enabled=true`
 - **Certificate Monitoring**: cert-manager auto-renewal (30 days before expiration)
 - **Race Condition Prevention**: LoadBalancer must exist and DNS must resolve before certificate request
+- **Database Credentials**: Stored in AWS Secrets Manager and Kubernetes Secrets (never in Helm values)
+- **Basic Auth Security**: Bcrypt password hashing (no SHA-1 fallback), credentials in Secrets Manager
 
 **Acceptance Criteria**:
 
@@ -427,7 +455,117 @@ The tool must support updating TLS configuration after deployment:
 
 ---
 
-#### FR-8: Infrastructure Provisioning
+#### FR-8: Basic Authentication
+
+**Priority**: SHOULD HAVE
+**User Story**: As a user, I want to protect my n8n instance with basic authentication to prevent unauthorized access while the application is exposed via public LoadBalancer.
+
+**Requirements**:
+
+**Basic Auth Configuration (Phase 4):**
+- After TLS configuration, prompt user for basic authentication
+- Auto-generate credentials:
+  - Username: `admin` (fixed)
+  - Password: 12 random alphanumeric characters (auto-generated)
+- Store credentials in AWS Secrets Manager (`/n8n/basic-auth`)
+- Display credentials to user once (user must save them)
+- Configure NGINX ingress with basic auth annotations
+- Create Kubernetes Secret for auth file (htpasswd format)
+- Apply basic auth to all ingress paths
+
+**Technical Implementation:**
+- Use `htpasswd` utility to generate bcrypt password hash
+- Create Kubernetes Secret: `n8n-basic-auth` with auth file
+- Update ingress annotations:
+  - `nginx.ingress.kubernetes.io/auth-type: basic`
+  - `nginx.ingress.kubernetes.io/auth-secret: n8n-basic-auth`
+  - `nginx.ingress.kubernetes.io/auth-realm: "Authentication Required - N8N"`
+- Helm upgrade to apply basic auth configuration
+- Store credentials in AWS Secrets Manager for backup/recovery
+
+**Acceptance Criteria**:
+- [ ] User prompted for basic auth after TLS configuration
+- [ ] Credentials auto-generated securely
+- [ ] Username is always `admin`
+- [ ] Password is 12 random alphanumeric characters
+- [ ] Credentials stored in AWS Secrets Manager
+- [ ] Credentials displayed to user with warning to save
+- [ ] NGINX ingress configured with basic auth
+- [ ] Basic auth applies to HTTP and HTTPS access
+- [ ] Authentication required before accessing n8n web interface
+- [ ] Invalid credentials rejected by ingress
+- [ ] Valid credentials grant access to n8n
+
+**Security Considerations**:
+- Password generated using cryptographically secure random
+- Password hashed with bcrypt before storing in Kubernetes Secret
+- Credentials never logged in plaintext
+- AWS Secrets Manager provides backup of credentials
+- User warned to save credentials securely
+
+---
+
+#### FR-9: Database Selection (SQLite vs PostgreSQL)
+
+**Priority**: SHOULD HAVE
+**User Story**: As a user, I want to choose between SQLite and PostgreSQL as my n8n database backend based on my scalability and reliability needs.
+
+**Requirements**:
+
+**Database Selection Prompt (Phase 1 - Terraform Configuration):**
+- During initial configuration, prompt user for database choice:
+  - Option 1: SQLite (default, simpler, file-based)
+  - Option 2: PostgreSQL (RDS, production-grade, scalable)
+- If SQLite selected:
+  - Use local file storage on EBS volume
+  - No additional infrastructure required
+  - Lower cost (~$1/month for EBS storage)
+- If PostgreSQL selected:
+  - Provision RDS PostgreSQL instance
+  - Prompt for RDS configuration:
+    - Instance class (db.t3.micro, db.t3.small, db.t3.medium)
+    - Storage size (default: 20GB)
+    - Multi-AZ deployment (yes/no)
+  - Configure n8n with PostgreSQL connection
+  - Store DB credentials in AWS Secrets Manager
+
+**RDS Provisioning (when PostgreSQL selected):**
+- Create RDS subnet group in private subnets
+- Create RDS security group (allow access from EKS nodes only)
+- Provision RDS PostgreSQL instance (version 15+)
+- Generate random database password
+- Store credentials in AWS Secrets Manager (`/n8n/db-credentials`)
+- Configure n8n Helm chart with PostgreSQL environment variables:
+  - `DB_TYPE=postgresdb`
+  - `DB_POSTGRESDB_HOST=<rds-endpoint>`
+  - `DB_POSTGRESDB_PORT=5432`
+  - `DB_POSTGRESDB_DATABASE=n8n`
+  - `DB_POSTGRESDB_USER=n8n_user`
+  - `DB_POSTGRESDB_PASSWORD=<from-secrets-manager>`
+
+**Acceptance Criteria**:
+- [ ] User prompted for database choice during configuration
+- [ ] SQLite selected by default
+- [ ] PostgreSQL option triggers RDS provisioning
+- [ ] RDS instance created in private subnets
+- [ ] RDS security group restricts access to EKS nodes only
+- [ ] Database credentials auto-generated and stored in Secrets Manager
+- [ ] n8n configured correctly for selected database type
+- [ ] SQLite uses persistent EBS volume
+- [ ] PostgreSQL uses RDS endpoint
+- [ ] Database connection tested before deployment completes
+- [ ] Data persists across n8n pod restarts (both SQLite and PostgreSQL)
+
+**Cost Considerations**:
+- SQLite: ~$1/month (EBS storage only)
+- PostgreSQL (RDS db.t3.micro): ~$15/month (single-AZ) or ~$30/month (multi-AZ)
+- PostgreSQL (RDS db.t3.small): ~$30/month (single-AZ) or ~$60/month (multi-AZ)
+- PostgreSQL storage: ~$0.115/GB-month (20GB = ~$2.30/month)
+- Display cost estimate to user based on selection
+
+---
+
+#### FR-10: Infrastructure Provisioning
 
 **Priority**: MUST HAVE
 **User Story**: As a user, I want the tool to automatically provision all required AWS EKS infrastructure.
@@ -449,26 +587,43 @@ The tool must support updating TLS configuration after deployment:
 - Static Elastic IP for NLB (for consistent DNS mapping)
 - n8n Helm release with proper configuration
 
-**Conditionally Create (based on TLS configuration):**
+**Conditionally Create (based on user configuration):**
+
+*TLS Configuration:*
 - cert-manager (v1.13+) via Helm - if user selects Let's Encrypt option
 - ClusterIssuer for Let's Encrypt (HTTP-01 challenge) - if using Let's Encrypt
 - Kubernetes TLS Secret - if user provides BYO certificates
 - Ingress TLS configuration - if TLS enabled
 
+*Basic Authentication:*
+- Kubernetes Secret for basic auth (htpasswd format) - if basic auth enabled
+- Ingress basic auth annotations - if basic auth enabled
+- AWS Secrets Manager secret for credentials backup - if basic auth enabled
+
+*Database Configuration:*
+- RDS PostgreSQL instance - if PostgreSQL selected (instead of SQLite)
+- RDS subnet group in private subnets - if PostgreSQL selected
+- RDS security group - if PostgreSQL selected
+- AWS Secrets Manager secret for DB credentials - if PostgreSQL selected
+
 **Acceptance Criteria**:
 - All resources tagged appropriately
 - Infrastructure follows AWS best practices
 - Private subnets used for compute workloads (nodes)
-- Encryption enabled where applicable (EBS, SSM)
+- Encryption enabled where applicable (EBS, SSM, RDS)
 - Least privilege IAM policies
 - Multi-AZ deployment for high availability
 - NLB has static Elastic IP allocated
 - cert-manager only deployed if Let's Encrypt selected
 - TLS configuration applied correctly based on user choice
+- Basic auth configured correctly if user enables it
+- RDS provisioned only if PostgreSQL selected
+- Database credentials stored securely in Secrets Manager
+- n8n configured with correct database backend
 
 ---
 
-#### FR-9: Terraform Execution
+#### FR-11: Terraform Execution
 
 **Priority**: MUST HAVE
 **User Story**: As a user, I want the tool to run Terraform commands automatically and show me the results.
@@ -492,7 +647,7 @@ The tool must support updating TLS configuration after deployment:
 
 ---
 
-#### FR-10: Helm Deployment
+#### FR-12: Helm Deployment
 
 **Priority**: MUST HAVE
 **User Story**: As a user, I want n8n automatically deployed to Kubernetes after cluster creation.
@@ -514,7 +669,7 @@ The tool must support updating TLS configuration after deployment:
 
 ---
 
-#### FR-11: Post-Deployment Information
+#### FR-13: Post-Deployment Information
 
 **Priority**: MUST HAVE
 **User Story**: As a user, I want clear instructions on how to access my n8n instance after deployment.
@@ -536,7 +691,7 @@ The tool must support updating TLS configuration after deployment:
 
 ---
 
-#### FR-12: Error Handling & Recovery
+#### FR-14: Error Handling & Recovery
 
 **Priority**: SHOULD HAVE
 **User Story**: As a user, I want clear error messages and recovery instructions when something goes wrong.
@@ -559,7 +714,7 @@ The tool must support updating TLS configuration after deployment:
 
 ### 5.2 Configuration Management
 
-#### FR-13: File Modification Strategy
+#### FR-15: File Modification Strategy
 
 **Priority**: MUST HAVE
 **User Story**: As a maintainer, I need the tool to modify configuration files in a safe, version-control-friendly way.
@@ -581,7 +736,7 @@ The tool must support updating TLS configuration after deployment:
 
 ### 5.3 Security Requirements
 
-#### FR-14: Security Best Practices
+#### FR-16: Security Best Practices
 
 **Priority**: MUST HAVE
 **User Story**: As a user, I want my deployment to follow security best practices without extra effort.
@@ -694,7 +849,8 @@ The tool must support updating TLS configuration after deployment:
 - Explain cost breakdown clearly
 
 **Cost Target:**
-- EKS deployment: $150-260/month (control plane ~$73 + nodes ~$60 + NAT gateways ~$97 + NLB ~$16)
+- EKS deployment (SQLite): $150-260/month (control plane ~$73 + nodes ~$60 + NAT gateways ~$97 + NLB ~$16 + EBS ~$1)
+- EKS deployment (PostgreSQL): $165-290/month (add ~$15-30/month for RDS db.t3.micro, or ~$30-60/month for db.t3.small)
 
 ---
 
@@ -793,8 +949,17 @@ The tool must support updating TLS configuration after deployment:
 │  └────────────────────────────────────────────────────────────┘ │
 │                                                                   │
 │  ┌────────────────────────────────────────────────────────────┐ │
-│  │  SSM Parameter Store                                       │ │
-│  │  - /n8n/encryption_key (SecureString)                      │ │
+│  │  AWS Secrets Manager                                       │ │
+│  │  - /n8n/encryption_key (n8n encryption key)                │ │
+│  │  - /n8n/basic-auth (admin credentials - if enabled)        │ │
+│  │  - /n8n/db-credentials (RDS credentials - if PostgreSQL)   │ │
+│  └────────────────────────────────────────────────────────────┘ │
+│                                                                   │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │  RDS PostgreSQL (Optional - if selected instead of SQLite)│ │
+│  │  - PostgreSQL 15+ in private subnets                       │ │
+│  │  - Multi-AZ option available                               │ │
+│  │  - db.t3.micro or db.t3.small instance                     │ │
 │  └────────────────────────────────────────────────────────────┘ │
 │                                                                   │
 │  ┌────────────────────────────────────────────────────────────┐ │
@@ -806,7 +971,7 @@ The tool must support updating TLS configuration after deployment:
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-**Cost Breakdown:**
+**Cost Breakdown (SQLite):**
 - EKS control plane: ~$73/month
 - EC2 nodes (2x t3.medium): ~$60/month
 - NAT Gateways (3x): ~$97/month
@@ -815,10 +980,20 @@ The tool must support updating TLS configuration after deployment:
 - Data transfer: Variable (~$5-10/month)
 - **Total: ~$252-262/month**
 
+**Cost Breakdown (PostgreSQL/RDS):**
+- Base EKS costs: ~$247-257/month (same as above)
+- RDS db.t3.micro (single-AZ): ~$15/month
+- RDS db.t3.micro (multi-AZ): ~$30/month
+- RDS db.t3.small (single-AZ): ~$30/month
+- RDS db.t3.small (multi-AZ): ~$60/month
+- RDS storage (20GB): ~$2.30/month
+- **Total: ~$264-319/month (depending on RDS configuration)**
+
 **Cost optimization options:**
 - Use 1 NAT Gateway instead of 3 (saves ~$65/month, reduces HA)
 - Use smaller nodes like t3.small (saves ~$30/month, reduces capacity)
 - Reduce min/desired node count to 1 (saves ~$30/month, reduces HA)
+- Use SQLite instead of PostgreSQL (saves ~$15-60/month, reduces scalability)
 
 ---
 
@@ -1569,6 +1744,39 @@ A feature is considered "done" when:
 - [ ] No pod restarts required for certificate updates
 - [ ] TLS update doesn't affect application data
 
+**Basic Authentication:**
+- [ ] User prompted for basic auth in Phase 4
+- [ ] Credentials auto-generated (username: admin, password: 12 chars)
+- [ ] Credentials displayed to user once
+- [ ] Credentials stored in AWS Secrets Manager
+- [ ] Kubernetes Secret created with htpasswd format
+- [ ] Ingress configured with basic auth annotations
+- [ ] Basic auth required for HTTP access
+- [ ] Basic auth required for HTTPS access
+- [ ] Invalid credentials rejected at ingress level
+- [ ] Valid credentials grant access to n8n
+- [ ] Can skip basic auth configuration
+- [ ] n8n publicly accessible if basic auth skipped
+
+**Database Selection (SQLite vs PostgreSQL):**
+- [ ] User prompted for database choice during configuration
+- [ ] SQLite selected by default
+- [ ] PostgreSQL option triggers RDS configuration prompts
+- [ ] RDS instance class selectable (db.t3.micro, db.t3.small, db.t3.medium)
+- [ ] RDS storage size configurable (default 20GB)
+- [ ] Multi-AZ option available for RDS
+- [ ] RDS provisioned in private subnets
+- [ ] RDS security group created and configured
+- [ ] RDS security group allows access from EKS nodes only
+- [ ] Database credentials auto-generated for PostgreSQL
+- [ ] DB credentials stored in AWS Secrets Manager
+- [ ] n8n configured with SQLite (file-based) when SQLite selected
+- [ ] n8n configured with PostgreSQL connection when PostgreSQL selected
+- [ ] Database connection tested before deployment completes
+- [ ] Data persists in SQLite (EBS volume)
+- [ ] Data persists in PostgreSQL (RDS)
+- [ ] Cost estimate displayed based on database selection
+
 **Error Handling:**
 - [ ] Terraform errors displayed clearly
 - [ ] Backups restored on Ctrl+C
@@ -1581,7 +1789,9 @@ A feature is considered "done" when:
 - [ ] `terraform destroy` removes all EKS resources
 - [ ] `terraform destroy` removes cert-manager (if deployed)
 - [ ] `terraform destroy` removes NLB and Elastic IP
-- [ ] No orphaned resources left in AWS (check TLS secrets, certificates)
+- [ ] `terraform destroy` removes RDS instance (if PostgreSQL was selected)
+- [ ] `terraform destroy` removes AWS Secrets Manager secrets
+- [ ] No orphaned resources left in AWS (check TLS secrets, certificates, RDS snapshots)
 - [ ] Local backup files cleaned up
 
 ---
@@ -1634,17 +1844,16 @@ The project is considered successful when:
 These features are acknowledged but not included in initial release:
 
 1. **Multi-region deployments**
-2. **RDS PostgreSQL integration** (currently uses SQLite)
-3. **Redis integration** for queue mode
-4. **Backup/restore automation**
-5. **Monitoring stack** (Prometheus, Grafana)
-6. **GitOps integration** (ArgoCD, Flux)
-7. **Cost optimization recommendations**
-8. **Automatic scaling policies**
-9. **Disaster recovery planning**
-10. **Blue/green deployments**
-11. **Spot instance support**
-12. **Private VPC endpoints** (no internet access)
+2. **Redis integration** for queue mode
+3. **Backup/restore automation**
+4. **Monitoring stack** (Prometheus, Grafana)
+5. **GitOps integration** (ArgoCD, Flux)
+6. **Cost optimization recommendations**
+7. **Automatic scaling policies**
+8. **Disaster recovery planning**
+9. **Blue/green deployments**
+10. **Spot instance support**
+11. **Private VPC endpoints** (no internet access)
 
 ---
 
@@ -1686,8 +1895,14 @@ The AWS credentials used must have permissions to create:
 - Node groups
 - EKS addons
 
-**SSM:**
-- Parameters (SecureString)
+**Secrets Manager:**
+- Secrets (for encryption key, basic auth, database credentials)
+
+**RDS (if PostgreSQL selected):**
+- DB instances
+- DB subnet groups
+- DB parameter groups
+- DB security groups
 
 **ELB:**
 - Load balancers (for EKS ingress)
@@ -1703,7 +1918,8 @@ Example IAM policy: (for production, tighten further)
         "ec2:*",
         "eks:*",
         "iam:*",
-        "ssm:*",
+        "secretsmanager:*",
+        "rds:*",
         "elasticloadbalancing:*"
       ],
       "Resource": "*"
@@ -1719,6 +1935,7 @@ Example IAM policy: (for production, tighten further)
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 1.0 | 2025-10-05 | System | Initial requirements document |
+| 1.1 | 2025-10-05 | System | Added FR-8 (Basic Authentication), FR-9 (Database Selection - SQLite vs PostgreSQL), updated Phase 4 to include basic auth configuration, added RDS provisioning requirements, updated cost estimates, updated acceptance criteria |
 
 ---
 

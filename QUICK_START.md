@@ -25,21 +25,29 @@ python3 setup.py
 The CLI performs a **4-phase deployment**:
 
 ### Phase 1: Infrastructure (~22-27 minutes)
+- Prompts for cluster sizing, namespace, PVC size, hostname, timezone
+- **Database selection**: SQLite (file-based, ~$1/month) or PostgreSQL/RDS (~$15-60/month)
 - VPC, subnets, NAT gateways
 - EKS cluster and node group
-- NGINX ingress controller (creates LoadBalancer)
+- **Optional**: RDS PostgreSQL instance (if selected)
+- NGINX ingress controller (creates LoadBalancer with static Elastic IPs)
 - EBS CSI driver and StorageClass
 
 ### Phase 2: Application (~2-3 minutes)
-- Deploys n8n via Helm CLI
+- **If PostgreSQL**: Creates Kubernetes Secret with database credentials
+- Deploys n8n via Helm CLI with configured namespace and PVC size
 - Initially deployed with HTTP only (no TLS)
+- Waits for deployment to be ready (kubectl wait with 5-minute timeout)
 - Creates namespace, PVC, deployment, service, ingress
 
 ### Phase 3: LoadBalancer Retrieval (~1-2 minutes)
 - Retrieves LoadBalancer DNS automatically
+- Displays **static Elastic IPs** attached to the NLB
 - Displays access URL: `http://<load-balancer-dns>`
 
-### Phase 4: TLS Configuration (Optional, ~5 minutes)
+### Phase 4: TLS & Basic Auth Configuration (Optional, ~5-6 minutes)
+
+**Step 1: TLS Configuration**
 - **Interactive prompt** after LoadBalancer is ready
 - You can skip TLS initially or configure it now
 - Two options:
@@ -50,9 +58,20 @@ The CLI performs a **4-phase deployment**:
 ```
 1. Create DNS record for: your-domain.com
 2. Point to LoadBalancer: a1234567890.us-east-1.elb.amazonaws.com
+   (or point to one of the static Elastic IPs)
 3. Confirm DNS is configured
 4. Setup proceeds with cert-manager installation
 ```
+
+**Step 2: Basic Authentication Configuration**
+- After TLS (or if TLS is skipped), you're prompted to enable basic auth
+- If enabled:
+  - Auto-generates credentials (Username: `admin`, Password: 12 random chars)
+  - Stores credentials in AWS Secrets Manager at `/n8n/basic-auth`
+  - Displays credentials (you **must save them**)
+  - Creates Kubernetes Secret with bcrypt-hashed password
+  - Updates ingress with nginx basic auth annotations
+- Both HTTP and HTTPS access require basic auth (if enabled)
 
 ## 4. Watch the Deployment
 
@@ -77,7 +96,7 @@ Access n8n at:    http://a1234567890.us-east-1.elb.amazonaws.com
 # Check cluster nodes
 kubectl get nodes
 
-# Check n8n pods
+# Check n8n pods (replace 'n8n' with your configured namespace if different)
 kubectl get pods -n n8n
 
 # Check ingress
@@ -86,9 +105,11 @@ kubectl get ingress -n n8n
 # View n8n logs
 kubectl logs -f deployment/n8n -n n8n
 
-# Check LoadBalancer service
+# Check LoadBalancer service and static IPs
 kubectl get svc -n ingress-nginx
 ```
+
+**Note**: The commands above use the default namespace `n8n`. If you configured a different namespace during setup, replace `-n n8n` with `-n <your-namespace>`.
 
 ## 6. Configure TLS (If Skipped)
 

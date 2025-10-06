@@ -54,6 +54,11 @@ output "nginx_ingress_controller_endpoint" {
   description = "Command to get NGINX Ingress LoadBalancer endpoint"
 }
 
+output "nlb_elastic_ips" {
+  value       = var.enable_nginx_ingress ? aws_eip.nlb[*].public_ip : []
+  description = "Static Elastic IPs attached to the Network Load Balancer"
+}
+
 output "configure_kubectl" {
   value       = "aws eks update-kubeconfig --region ${var.region} --name ${aws_eks_cluster.main.name} --profile ${var.aws_profile}"
   description = "Command to configure kubectl for this EKS cluster"
@@ -73,4 +78,52 @@ output "n8n_encryption_key_value" {
   value       = data.aws_ssm_parameter.n8n_encryption_key.value
   description = "N8N encryption key from SSM (for helm deployment)"
   sensitive   = true
+}
+
+########################################
+# Database Outputs
+########################################
+output "database_type" {
+  value       = var.database_type
+  description = "Database backend type (sqlite or postgresql)"
+}
+
+output "rds_endpoint" {
+  value       = var.database_type == "postgresql" ? aws_db_instance.n8n[0].endpoint : null
+  description = "RDS PostgreSQL endpoint (null if using SQLite)"
+}
+
+output "rds_address" {
+  value       = var.database_type == "postgresql" ? aws_db_instance.n8n[0].address : null
+  description = "RDS PostgreSQL address (null if using SQLite)"
+}
+
+output "rds_port" {
+  value       = var.database_type == "postgresql" ? aws_db_instance.n8n[0].port : null
+  description = "RDS PostgreSQL port (null if using SQLite)"
+}
+
+output "rds_database_name" {
+  value       = var.database_type == "postgresql" ? var.rds_database_name : null
+  description = "RDS PostgreSQL database name (null if using SQLite)"
+}
+
+output "rds_username" {
+  value       = var.database_type == "postgresql" ? var.rds_username : null
+  description = "RDS PostgreSQL username (null if using SQLite)"
+  sensitive   = true
+}
+
+output "rds_password" {
+  value       = var.database_type == "postgresql" ? random_password.rds_password[0].result : null
+  description = "RDS PostgreSQL password (null if using SQLite)"
+  sensitive   = true
+}
+
+########################################
+# Basic Auth Outputs
+########################################
+output "basic_auth_enabled" {
+  value       = var.enable_basic_auth
+  description = "Whether basic authentication is enabled"
 }

@@ -3,10 +3,12 @@
 ## Overview
 - Terraform provisions a dedicated VPC (three public and three private subnets), Internet/NAT gateways, an Amazon EKS 1.29 control plane, and a managed node group sized by `node_*` variables.
 - AWS IAM roles are created for the control plane, worker nodes, and the AWS EBS CSI driver; the driver is enabled with a default `ebs-gp3` StorageClass.
-- Sensitive settings (the n8n encryption key) are stored in AWS Systems Manager Parameter Store and injected into the Helm release at deploy time.
-- Terraform installs the upstream `ingress-nginx` chart (Network Load Balancer by default) but **does NOT deploy n8n**. The n8n application is deployed separately via Helm CLI by `setup.py` after infrastructure is ready.
+- Sensitive settings (the n8n encryption key, database credentials, basic auth credentials) are stored in AWS Systems Manager Parameter Store and AWS Secrets Manager, then injected into Kubernetes Secrets at deploy time.
+- Terraform installs the upstream `ingress-nginx` chart (Network Load Balancer with static Elastic IPs by default) but **does NOT deploy n8n**. The n8n application is deployed separately via Helm CLI by `setup.py` after infrastructure is ready.
+- Database backend can be SQLite (default, file-based) or PostgreSQL (RDS). The CLI prompts for database selection and provisions RDS resources if PostgreSQL is chosen.
 - TLS/HTTPS configuration is handled as a **post-deployment step** after the LoadBalancer is provisioned and DNS can be configured. This prevents race conditions with Let's Encrypt validation.
-- The interactive CLI (`python3 setup.py`) orchestrates a **4-phase deployment**: (1) Terraform infrastructure, (2) n8n application via Helm, (3) LoadBalancer retrieval, (4) optional TLS configuration.
+- Basic authentication can be configured post-deployment to protect access to n8n with auto-generated credentials (stored in AWS Secrets Manager).
+- The interactive CLI (`python3 setup.py`) orchestrates a **4-phase deployment**: (1) Terraform infrastructure, (2) n8n application via Helm, (3) LoadBalancer retrieval, (4) optional TLS & Basic Auth configuration.
 
 ## Prerequisites
 - macOS or Linux workstation with `python3`, Terraform >= 1.6, AWS CLI >= 2.0, kubectl, and Helm >= 3. The CLI verifies these before continuing.
@@ -19,42 +21,58 @@ The setup CLI performs a **4-phase deployment** to avoid race conditions with TL
 
 ### Phase 1: Infrastructure Deployment (~22-27 minutes)
 1. From the repository root, run `python3 setup.py`.
-2. Follow the prompts for AWS profile/region, cluster sizing, hostname, and timezone:
-   - Leaving the encryption key blank lets Terraform generate a 64-character key and persist it to SSM.
-   - **Note**: TLS configuration is NOT requested during this phase.
-3. The CLI writes `terraform/terraform.tfvars`, then runs `terraform init`, `terraform plan`, and `terraform apply`.
-4. Terraform provisions:
+2. Follow the prompts for:
+   - AWS profile/region
+   - Cluster sizing (node instance type, min/desired/max counts)
+   - Kubernetes namespace (default: n8n)
+   - Storage size for PVC (default: 10Gi)
+   - Hostname and timezone
+   - **Database selection**: SQLite (file-based, ~$1/month) or PostgreSQL/RDS (~$15-60/month)
+     - If PostgreSQL: prompts for RDS instance class, storage size, and multi-AZ configuration
+   - Encryption key (leaving blank generates a secure 64-character key)
+   - **Note**: TLS and Basic Auth configuration are NOT requested during this phase.
+3. The CLI displays the Terraform plan summary and asks for confirmation before proceeding.
+4. The CLI writes `terraform/terraform.tfvars`, then runs `terraform init`, `terraform plan`, and `terraform apply`.
+5. Terraform provisions:
    - VPC, subnets, NAT gateways, Internet Gateway
    - EKS cluster and managed node group
-   - NGINX ingress controller (creates Network Load Balancer)
+   - NGINX ingress controller (creates Network Load Balancer with static Elastic IPs)
    - EBS CSI driver and default StorageClass
    - SSM Parameter for encryption key
+   - **If PostgreSQL selected**: RDS instance, database security group, credentials in Secrets Manager
 
 ### Phase 2: Application Deployment (~2-3 minutes)
-5. After Terraform completes, the CLI configures kubectl using the `configure_kubectl` output.
-6. The CLI deploys n8n via **Helm CLI** (not Terraform):
+6. After Terraform completes, the CLI configures kubectl using the `configure_kubectl` output.
+7. **If PostgreSQL was selected**: The CLI creates a Kubernetes Secret with the database password (retrieved from Terraform outputs).
+8. The CLI deploys n8n via **Helm CLI** (not Terraform):
    ```bash
-   helm install n8n ./helm -n n8n --create-namespace \
+   helm install n8n ./helm -n <namespace> --create-namespace \
      --set ingress.enabled=true \
      --set ingress.className=nginx \
      --set ingress.host=<your-hostname> \
      --set ingress.tls.enabled=false \
      --set env.N8N_PROTOCOL=http \
-     --set-string envSecrets.N8N_ENCRYPTION_KEY=<from-ssm>
+     --set persistence.size=<configured-size> \
+     --set-string envSecrets.N8N_ENCRYPTION_KEY=<from-ssm> \
+     --set database.type=<sqlite|postgresql> \
+     --set database.postgresql.host=<rds-address>  # if PostgreSQL
    ```
-7. The application is initially deployed with **HTTP only** (no TLS).
+9. The application is initially deployed with **HTTP only** (no TLS).
+10. The CLI waits for the deployment to be ready (`kubectl wait --for=condition=available deployment/n8n` with 5-minute timeout).
 
 ### Phase 3: LoadBalancer Retrieval (~1-2 minutes)
-8. The CLI polls for the LoadBalancer DNS name:
-   ```bash
-   kubectl get svc -n ingress-nginx ingress-nginx-controller \
-     -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
-   ```
-9. Once ready, the LoadBalancer URL is displayed:
-   ```
-   LoadBalancer URL: a1234567890.us-east-1.elb.amazonaws.com
-   Access n8n at:    http://a1234567890.us-east-1.elb.amazonaws.com
-   ```
+11. The CLI polls for the LoadBalancer DNS name:
+    ```bash
+    kubectl get svc -n ingress-nginx ingress-nginx-controller \
+      -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+    ```
+12. Once ready, the LoadBalancer URL and **static Elastic IPs** are displayed:
+    ```
+    LoadBalancer URL:  a1234567890.us-east-1.elb.amazonaws.com
+    Static Elastic IPs: 52.1.2.3, 52.1.2.4, 52.1.2.5
+    Access n8n at:     http://a1234567890.us-east-1.elb.amazonaws.com
+    ```
+    The static IPs allow for consistent DNS A-record mapping.
 
 ### Phase 4: TLS Configuration (Optional, ~5 minutes)
 10. The CLI prompts: **"Would you like to configure TLS/HTTPS now?"**
@@ -90,12 +108,45 @@ The setup CLI performs a **4-phase deployment** to avoid race conditions with TL
 14. The CLI upgrades n8n Helm release with TLS enabled.
 15. Access n8n at `https://your-domain.com`.
 
+### Phase 4b: Basic Authentication Configuration (Optional, ~1 minute)
+16. After TLS configuration (or if TLS is skipped), the CLI prompts: **"Would you like to enable basic authentication for n8n?"**
+17. If you choose **Yes**:
+    - The CLI auto-generates credentials:
+      - Username: `admin`
+      - Password: 12 random alphanumeric characters
+    - Credentials are stored in AWS Secrets Manager at `/n8n/basic-auth`
+    - Credentials are displayed to the user (you **must save them**)
+    - The CLI creates a Kubernetes Secret with bcrypt-hashed password:
+      ```bash
+      kubectl create secret generic n8n-basic-auth -n <namespace> \
+        --from-literal=auth='admin:<bcrypt-hash>'
+      ```
+    - The CLI upgrades n8n Helm release with basic auth annotations:
+      ```bash
+      helm upgrade n8n ./helm -n <namespace> \
+        --reuse-values \
+        --set ingress.basicAuth.enabled=true \
+        --set ingress.basicAuth.secretName=n8n-basic-auth
+      ```
+18. Access to n8n now requires HTTP basic authentication before reaching the n8n login page.
+19. Both HTTP and HTTPS traffic are protected by basic auth (if enabled).
+
+**Security Notes**:
+- Basic auth credentials are hashed using bcrypt (not SHA-1)
+- Credentials are stored in AWS Secrets Manager for recovery
+- Basic auth protects the ingress layer, independent of n8n's own authentication
+- Requires `htpasswd` utility (from `apache2-utils` package on Debian/Ubuntu)
+
 ### Artifacts Created by the CLI
-- `terraform/terraform.tfvars` containing infrastructure configuration (AWS profile, region, cluster sizing, hostname, timezone).
+- `terraform/terraform.tfvars` containing infrastructure configuration (AWS profile, region, cluster sizing, database type, hostname, timezone, namespace, PVC size).
 - A generated encryption key if you declined to supply one; the key is saved in Parameter Store at `/n8n/encryption_key`.
-- Helm release `n8n` in namespace `n8n` (deployed via Helm CLI, not Terraform).
+- Helm release `n8n` in the configured namespace (deployed via Helm CLI, not Terraform).
+- **If PostgreSQL selected**: Kubernetes Secret `n8n-db-credentials` containing database password.
+- **If PostgreSQL selected**: AWS Secrets Manager secret with RDS credentials.
 - Optional: cert-manager installation and ClusterIssuer (if Let's Encrypt TLS was configured).
 - Optional: Kubernetes TLS secret `n8n-tls` (if BYO certificate was provided).
+- Optional: Kubernetes Secret `n8n-basic-auth` with bcrypt-hashed credentials (if basic auth was configured).
+- Optional: AWS Secrets Manager secret at `/n8n/basic-auth` (if basic auth was configured).
 - No changes are made to Terraform module defaults or `helm/values.yaml`; all overrides are passed via CLI arguments.
 
 ## Manual Command Reference
@@ -211,14 +262,27 @@ helm upgrade n8n ./helm -n n8n \
   - `cluster_name` defaults to `n8n-eks-cluster`, Kubernetes version `1.29`.
   - Worker capacity is controlled via `node_instance_types`, `node_desired_size`, `node_min_size`, and `node_max_size`.
 - **Ingress & TLS**
-  - `enable_nginx_ingress` installs `ingress-nginx` backed by an AWS Network Load Balancer.
+  - `enable_nginx_ingress` installs `ingress-nginx` backed by an AWS Network Load Balancer with static Elastic IPs.
+  - When enabled, static Elastic IPs are allocated and attached to the NLB for consistent DNS A-record mapping.
   - TLS configuration is **not handled by Terraform**. The n8n application is initially deployed with HTTP only.
   - TLS is configured post-deployment via `setup.py` (Phase 4) or manually using Helm upgrade commands.
   - `n8n_ingress_annotations` can be extended (for example, ALB annotations) through `terraform.tfvars`.
+- **Database Configuration**
+  - `database_type` defaults to `sqlite` (file-based, no RDS costs). Set to `postgresql` to provision RDS.
+  - `rds_instance_class`, `rds_allocated_storage`, `rds_multi_az` configure the PostgreSQL database when enabled.
+  - `rds_database_name` and `rds_username` set the database name and master username.
+  - Database credentials are auto-generated and stored in AWS Secrets Manager and Kubernetes Secrets (not in Helm values).
+  - PostgreSQL provides production-grade scalability at additional cost (~$15-60/month for db.t3.micro to db.t3.small).
+- **Basic Authentication**
+  - `enable_basic_auth` defaults to `false`. When enabled, auto-generated credentials protect the ingress.
+  - Credentials (username: `admin`, password: 12 random chars) stored in AWS Secrets Manager at `/n8n/basic-auth`.
+  - Password hashed using bcrypt before storage in Kubernetes Secret `n8n-basic-auth`.
+  - Basic auth is independent of n8n's own authentication and protects both HTTP and HTTPS access.
 - **Application Settings**
   - `n8n_host` falls back to `<project_tag>.local` when left blank.
+  - `n8n_namespace` defaults to `n8n`. All kubectl/helm operations honor the configured namespace.
   - `n8n_encryption_key` defaults to empty; Terraform automatically generates a secure key when none is supplied.
-  - `n8n_persistence_*` variables define the persistent volume claim (default 10 GiB using the gp3 StorageClass installed by Terraform).
+  - `n8n_persistence_size` defaults to `10Gi`. The configured size is passed to Helm during deployment.
   - Additional non-sensitive environment overrides can be added via `n8n_env_overrides`.
 
 ## TLS and DNS Scenarios
@@ -309,8 +373,28 @@ kubectl logs -f deployment/n8n -n n8n
   - Then run: `helm upgrade n8n ./helm -n n8n --reuse-values -f helm/values.yaml`
 
 ## Cost and Scaling Considerations
-- Baseline monthly estimate in `us-east-1`: EKS control plane (~$73), one `t3.medium` worker (~$30), three NAT gateways (~$98), Network Load Balancer (~$16), gp3 volume (~$1). Adjust AZ count, instance type, or NAT strategy to reduce spend.
-- To scale out: increase `node_max_size`, enable the Helm HPA, or integrate the Kubernetes Cluster Autoscaler (not included by default).
+
+**Baseline monthly estimate in `us-east-1`:**
+- EKS control plane: ~$73
+- One `t3.medium` worker node: ~$30
+- Three NAT gateways: ~$98
+- Network Load Balancer: ~$16
+- Three static Elastic IPs: ~$11
+- gp3 volume (10GB): ~$1
+- **SQLite deployment total: ~$229/month**
+- **PostgreSQL deployment (db.t3.micro): ~$244/month** (add ~$15/month for RDS)
+- **PostgreSQL deployment (db.t3.small): ~$259/month** (add ~$30/month for RDS)
+
+**Cost optimization strategies:**
+- Reduce AZ count (fewer NAT gateways and Elastic IPs)
+- Use smaller instance types (t3.small for nodes)
+- Single-AZ RDS (not recommended for production)
+- Consider AWS VPC endpoints to reduce NAT gateway data transfer costs
+
+**Scaling options:**
+- Increase `node_max_size` for horizontal node scaling
+- Enable Helm HPA for pod autoscaling
+- Integrate Kubernetes Cluster Autoscaler (not included by default)
 
 ## Cleanup
 

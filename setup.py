@@ -18,12 +18,13 @@ import signal
 
 # ANSI color codes
 class Colors:
-    HEADER = '\033[95m'
-    OKBLUE = '\033[94m'
-    OKCYAN = '\033[96m'
-    OKGREEN = '\033[92m'
-    WARNING = '\033[93m'
-    FAIL = '\033[91m'
+    # Liferay Lexicon-inspired color palette
+    HEADER = '\033[94m'    # Light Blue for headers
+    OKBLUE = '\033[1;94m'   # Bold Light Blue for branding elements
+    OKCYAN = '\033[96m'    # Cyan for informational text
+    OKGREEN = '\033[92m'   # Green for success messages
+    WARNING = '\033[93m'   # Yellow for warnings
+    FAIL = '\033[91m'      # Red for errors
     ENDC = '\033[0m'
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
@@ -40,9 +41,13 @@ class DeploymentConfig:
         self.cluster_name: str = "n8n-eks-cluster"
         self.node_instance_types: list = ["t3.medium"]
         self.node_desired_size: int = 1
+        self.node_min_size: int = 1
+        self.node_max_size: int = 2
+        self.n8n_namespace: str = "n8n"
         self.n8n_host: str = ""
         self.timezone: str = "America/Bahia"
         self.n8n_encryption_key: str = ""
+        self.n8n_persistence_size: str = "10Gi"
 
         # TLS Configuration
         self.tls_certificate_source: str = "none"  # "none", "byo", or "letsencrypt"
@@ -51,6 +56,17 @@ class DeploymentConfig:
         self.letsencrypt_email: str = ""
         self.letsencrypt_environment: str = "production"  # "staging" or "production"
 
+        # Database Configuration
+        self.database_type: str = "sqlite"  # "sqlite" or "postgresql"
+        self.rds_instance_class: str = "db.t3.micro"
+        self.rds_allocated_storage: int = 20
+        self.rds_multi_az: bool = False
+
+        # Basic Authentication Configuration
+        self.enable_basic_auth: bool = False
+        self.basic_auth_username: str = "admin"
+        self.basic_auth_password: str = ""
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             'aws_profile': self.aws_profile,
@@ -58,11 +74,20 @@ class DeploymentConfig:
             'cluster_name': self.cluster_name,
             'node_instance_types': self.node_instance_types,
             'node_desired_size': self.node_desired_size,
+            'node_min_size': self.node_min_size,
+            'node_max_size': self.node_max_size,
+            'n8n_namespace': self.n8n_namespace,
             'n8n_host': self.n8n_host,
             'timezone': self.timezone,
+            'n8n_persistence_size': self.n8n_persistence_size,
             'tls_certificate_source': self.tls_certificate_source,
             'letsencrypt_email': self.letsencrypt_email,
             'letsencrypt_environment': self.letsencrypt_environment,
+            'database_type': self.database_type,
+            'rds_instance_class': self.rds_instance_class,
+            'rds_allocated_storage': self.rds_allocated_storage,
+            'rds_multi_az': self.rds_multi_az,
+            'enable_basic_auth': self.enable_basic_auth,
         }
 
 class DependencyChecker:
@@ -92,6 +117,16 @@ class DependencyChecker:
     }
 
     @staticmethod
+    def check_python_version() -> Tuple[bool, str]:
+        """Check if Python version is 3.7 or higher"""
+        major, minor = sys.version_info[:2]
+        current_version = f"{major}.{minor}"
+
+        if major < 3 or (major == 3 and minor < 7):
+            return False, f"Python {current_version} (requires 3.7+)"
+        return True, f"Python {current_version}"
+
+    @staticmethod
     def check_tool(tool_name: str) -> bool:
         """Check if a tool is installed"""
         return shutil.which(tool_name) is not None
@@ -102,6 +137,17 @@ class DependencyChecker:
         missing = []
 
         print(f"\n{Colors.HEADER}🔍 Checking dependencies for EKS deployment...{Colors.ENDC}")
+
+        # Check Python version first
+        python_ok, python_info = cls.check_python_version()
+        if python_ok:
+            print(f"{Colors.OKGREEN}✓{Colors.ENDC} {python_info}")
+        else:
+            print(f"{Colors.FAIL}✗{Colors.ENDC} {python_info}")
+            print(f"\n{Colors.FAIL}Python 3.7 or higher is required!{Colors.ENDC}")
+            print(f"Current version: {python_info}")
+            print(f"Please upgrade Python: {Colors.OKCYAN}https://www.python.org/downloads/{Colors.ENDC}\n")
+            return False, [('python', {'description': 'Python 3.7+', 'install_url': 'https://www.python.org/downloads/'})]
 
         # Check all required tools
         for tool, info in cls.REQUIRED_TOOLS.items():
@@ -375,13 +421,33 @@ class ConfigurationPrompt:
             default="1"
         ))
 
+        self.config.node_min_size = int(self.prompt(
+            "Minimum number of nodes",
+            default="1"
+        ))
+
+        self.config.node_max_size = int(self.prompt(
+            "Maximum number of nodes",
+            default="2"
+        ))
+
         # N8N Configuration
         print(f"\n{Colors.BOLD}N8N Configuration{Colors.ENDC}")
+
+        self.config.n8n_namespace = self.prompt(
+            "Kubernetes namespace for n8n",
+            default="n8n"
+        )
 
         self.config.n8n_host = self.prompt(
             "N8N Hostname (FQDN for ingress)",
             default="n8n.example.com",
             required=True
+        )
+
+        self.config.n8n_persistence_size = self.prompt(
+            "Persistent volume size (e.g., 10Gi, 20Gi)",
+            default="10Gi"
         )
 
         # Timezone
@@ -405,6 +471,53 @@ class ConfigurationPrompt:
                 required=True
             )
 
+        # Database Configuration
+        print(f"\n{Colors.BOLD}Database Configuration{Colors.ENDC}")
+        print("\nChoose database backend for n8n:")
+        db_choice = self.prompt_choice(
+            "Database Type",
+            [
+                "SQLite (file-based, simpler, lower cost ~$1/month)",
+                "PostgreSQL (RDS, production-grade, scalable, ~$15-60/month)"
+            ],
+            default=0
+        )
+
+        if "PostgreSQL" in db_choice:
+            self.config.database_type = "postgresql"
+
+            print(f"\n{Colors.BOLD}RDS PostgreSQL Configuration{Colors.ENDC}")
+
+            # RDS instance class
+            rds_instances = ["db.t3.micro", "db.t3.small", "db.t3.medium"]
+            print(f"\nAvailable instance classes: {', '.join(rds_instances)}")
+            print(f"  • db.t3.micro:  ~$15/month (single-AZ), ~$30/month (multi-AZ)")
+            print(f"  • db.t3.small:  ~$30/month (single-AZ), ~$60/month (multi-AZ)")
+            print(f"  • db.t3.medium: ~$60/month (single-AZ), ~$120/month (multi-AZ)")
+
+            self.config.rds_instance_class = self.prompt(
+                "RDS Instance Class",
+                default="db.t3.micro"
+            )
+
+            # Storage
+            storage = self.prompt(
+                "Allocated storage (GB)",
+                default="20"
+            )
+            self.config.rds_allocated_storage = int(storage)
+
+            # Multi-AZ
+            self.config.rds_multi_az = self.prompt_yes_no(
+                "Enable Multi-AZ deployment (high availability)?",
+                default=False
+            )
+
+            print(f"\n{Colors.OKGREEN}✓ PostgreSQL RDS will be provisioned{Colors.ENDC}")
+        else:
+            self.config.database_type = "sqlite"
+            print(f"\n{Colors.OKGREEN}✓ SQLite will be used (file-based on EBS volume){Colors.ENDC}")
+
         # Show summary
         self._show_summary()
 
@@ -422,12 +535,19 @@ class ConfigurationPrompt:
         print(f"AWS Region:      {Colors.OKCYAN}{self.config.aws_region}{Colors.ENDC}")
         print(f"Cluster Name:    {Colors.OKCYAN}{self.config.cluster_name}{Colors.ENDC}")
         print(f"Node Type:       {Colors.OKCYAN}{self.config.node_instance_types[0]}{Colors.ENDC}")
-        print(f"Node Count:      {Colors.OKCYAN}{self.config.node_desired_size}{Colors.ENDC}")
+        print(f"Node Count:      {Colors.OKCYAN}{self.config.node_desired_size} (min: {self.config.node_min_size}, max: {self.config.node_max_size}){Colors.ENDC}")
+        print(f"Namespace:       {Colors.OKCYAN}{self.config.n8n_namespace}{Colors.ENDC}")
         print(f"N8N Host:        {Colors.OKCYAN}{self.config.n8n_host}{Colors.ENDC}")
+        print(f"PVC Size:        {Colors.OKCYAN}{self.config.n8n_persistence_size}{Colors.ENDC}")
         print(f"Timezone:        {Colors.OKCYAN}{self.config.timezone}{Colors.ENDC}")
         print(f"Encryption Key:  {Colors.OKCYAN}{'*' * 20} (hidden){Colors.ENDC}")
+        print(f"Database Type:   {Colors.OKCYAN}{self.config.database_type.upper()}{Colors.ENDC}")
+        if self.config.database_type == "postgresql":
+            print(f"  RDS Instance:  {Colors.OKCYAN}{self.config.rds_instance_class}{Colors.ENDC}")
+            print(f"  RDS Storage:   {Colors.OKCYAN}{self.config.rds_allocated_storage}GB{Colors.ENDC}")
+            print(f"  RDS Multi-AZ:  {Colors.OKCYAN}{'Yes' if self.config.rds_multi_az else 'No'}{Colors.ENDC}")
         print("=" * 60)
-        print(f"\n{Colors.WARNING}Note: TLS will be configured after deployment{Colors.ENDC}")
+        print(f"\n{Colors.WARNING}Note: TLS and Basic Auth will be configured after deployment{Colors.ENDC}")
 
 class FileUpdater:
     """Handles updating Terraform and Helm configuration files"""
@@ -509,12 +629,32 @@ class FileUpdater:
             f'cluster_name       = "{config.cluster_name}"',
             f'node_instance_types = {json.dumps(config.node_instance_types)}',
             f'node_desired_size  = {config.node_desired_size}',
+            f'node_min_size      = {config.node_min_size}',
+            f'node_max_size      = {config.node_max_size}',
             f'n8n_host           = "{config.n8n_host}"',
             f'timezone           = "{config.timezone}"',
             f'n8n_encryption_key = "{config.n8n_encryption_key}"',
-            f'n8n_namespace      = "n8n"',
+            f'n8n_namespace      = "{config.n8n_namespace}"',
+            f'n8n_persistence_size = "{config.n8n_persistence_size}"',
             "",
+            "# Database Configuration",
+            f'database_type      = "{config.database_type}"',
         ]
+
+        # Add RDS configuration if PostgreSQL is selected
+        if config.database_type == "postgresql":
+            lines.extend([
+                f'rds_instance_class = "{config.rds_instance_class}"',
+                f'rds_allocated_storage = {config.rds_allocated_storage}',
+                f'rds_multi_az       = {"true" if config.rds_multi_az else "false"}',
+            ])
+
+        lines.extend([
+            "",
+            "# Basic Authentication Configuration",
+            f'enable_basic_auth  = {"true" if config.enable_basic_auth else "false"}',
+            "",
+        ])
 
         content = "\n".join(lines)
         tfvars_file.write_text(content)
@@ -585,6 +725,55 @@ class FileUpdater:
             self.restore_backup()
             raise
 
+
+def load_existing_configuration(script_dir: Path) -> DeploymentConfig:
+    """Load deployment values from terraform/terraform.tfvars"""
+    tfvars_path = script_dir / "terraform" / "terraform.tfvars"
+
+    if not tfvars_path.exists():
+        raise FileNotFoundError("terraform/terraform.tfvars not found; run initial setup first")
+
+    config = DeploymentConfig()
+
+    for raw_line in tfvars_path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+
+        key, value = [part.strip() for part in line.split('=', 1)]
+        value = value.rstrip(',')
+
+        parsed: Any = value
+        if value.startswith('"') and value.endswith('"'):
+            parsed = value[1:-1]
+        else:
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                parsed = value
+
+        if key == 'aws_profile':
+            config.aws_profile = str(parsed)
+        elif key == 'region':
+            config.aws_region = str(parsed)
+        elif key == 'cluster_name':
+            config.cluster_name = str(parsed)
+        elif key == 'node_instance_types':
+            config.node_instance_types = list(parsed) if isinstance(parsed, list) else [str(parsed)]
+        elif key == 'node_desired_size':
+            config.node_desired_size = int(parsed)
+        elif key == 'n8n_host':
+            config.n8n_host = str(parsed)
+        elif key == 'timezone':
+            config.timezone = str(parsed)
+        elif key == 'n8n_encryption_key':
+            config.n8n_encryption_key = str(parsed)
+
+    if not config.n8n_host:
+        raise ValueError("n8n_host is missing in terraform.tfvars")
+
+    return config
+
 class TerraformRunner:
     """Handles Terraform execution"""
 
@@ -631,18 +820,27 @@ class TerraformRunner:
 
         return success
 
-    def plan(self) -> bool:
-        """Run Terraform plan"""
+    def plan(self, display_output: bool = True) -> Tuple[bool, str]:
+        """Run Terraform plan and optionally display output
+
+        Returns:
+            Tuple of (success, output_text)
+        """
         print(f"\n{Colors.HEADER}📋 Running Terraform plan...{Colors.ENDC}")
-        success, output = self.run_command(['plan'])
+        success, output = self.run_command(['plan', '-no-color'])
 
         if success:
             print(f"{Colors.OKGREEN}✓ Terraform plan completed{Colors.ENDC}")
+            if display_output:
+                print(f"\n{Colors.BOLD}Plan Summary:{Colors.ENDC}")
+                print("=" * 60)
+                print(output)
+                print("=" * 60)
         else:
             print(f"{Colors.FAIL}✗ Terraform plan failed{Colors.ENDC}")
             print(output)
 
-        return success
+        return success, output
 
     def apply(self) -> bool:
         """Apply Terraform configuration"""
@@ -698,8 +896,17 @@ class HelmRunner:
         except Exception as e:
             return False, str(e)
 
-    def deploy_n8n(self, config: DeploymentConfig, encryption_key: str, namespace: str = "n8n", tls_enabled: bool = False) -> bool:
-        """Deploy n8n via Helm without TLS initially"""
+    def deploy_n8n(self, config: DeploymentConfig, encryption_key: str, namespace: str = "n8n",
+                    tls_enabled: bool = False, db_config: Dict[str, Any] = None) -> bool:
+        """Deploy n8n via Helm without TLS initially
+
+        Args:
+            config: Deployment configuration
+            encryption_key: N8N encryption key
+            namespace: Kubernetes namespace
+            tls_enabled: Whether to enable TLS
+            db_config: Database configuration from Terraform outputs (for PostgreSQL)
+        """
         print(f"\n{Colors.HEADER}🎯 Deploying n8n application...{Colors.ENDC}")
 
         # Build helm values
@@ -710,18 +917,88 @@ class HelmRunner:
             '--set', f'ingress.enabled=true',
             '--set', f'ingress.className=nginx',
             '--set', f'ingress.host={config.n8n_host}',
+            '--set', 'ingress.allowLoadBalancerHostname=true',
             '--set', f'ingress.tls.enabled={str(tls_enabled).lower()}',
             '--set', f'env.N8N_HOST={config.n8n_host}',
             '--set', f'env.N8N_PROTOCOL={"https" if tls_enabled else "http"}',
             '--set', f'env.GENERIC_TIMEZONE={config.timezone}',
             '--set', f'env.TZ={config.timezone}',
             '--set-string', f'envSecrets.N8N_ENCRYPTION_KEY={encryption_key}',
+            '--set', f'persistence.size={config.n8n_persistence_size}',
         ]
+
+        # Add database configuration if PostgreSQL is selected
+        if db_config and db_config.get('database_type') == 'postgresql':
+            print(f"{Colors.OKCYAN}  Configuring PostgreSQL database connection...{Colors.ENDC}")
+
+            # Create Kubernetes Secret for database credentials
+            try:
+                # Check if secret already exists and delete it
+                subprocess.run(
+                    ['kubectl', 'delete', 'secret', 'n8n-db-credentials', '-n', namespace],
+                    capture_output=True
+                )
+
+                # Create new secret with database credentials
+                result = subprocess.run([
+                    'kubectl', 'create', 'secret', 'generic', 'n8n-db-credentials',
+                    '-n', namespace,
+                    f'--from-literal=password={db_config.get("rds_password", "")}'
+                ], capture_output=True, text=True)
+
+                if result.returncode != 0:
+                    print(f"{Colors.FAIL}✗ Failed to create database credentials secret{Colors.ENDC}")
+                    print(result.stderr)
+                    return False
+
+                print(f"{Colors.OKGREEN}  ✓ Database credentials stored securely in Kubernetes Secret{Colors.ENDC}")
+            except Exception as e:
+                print(f"{Colors.FAIL}✗ Error creating database secret: {e}{Colors.ENDC}")
+                return False
+
+            values_args.extend([
+                '--set', 'database.type=postgresql',
+                '--set', f'database.postgresql.host={db_config.get("rds_address", "")}',
+                '--set', f'database.postgresql.port=5432',
+                '--set', f'database.postgresql.database={db_config.get("rds_database_name", "n8n")}',
+                '--set', f'database.postgresql.user={db_config.get("rds_username", "")}',
+                # Password will be read from secret, not passed here
+            ])
+        else:
+            # Default to SQLite
+            values_args.extend([
+                '--set', 'database.type=sqlite',
+            ])
 
         success, output = self.run_command(values_args)
 
         if success:
             print(f"{Colors.OKGREEN}✓ n8n deployed successfully{Colors.ENDC}")
+            if db_config and db_config.get('database_type') == 'postgresql':
+                print(f"{Colors.OKGREEN}  Using PostgreSQL database at {db_config.get('rds_address')}{Colors.ENDC}")
+            else:
+                print(f"{Colors.OKGREEN}  Using SQLite database (file-based){Colors.ENDC}")
+
+            # Wait for deployment to be ready
+            print(f"\n{Colors.HEADER}Waiting for n8n deployment to be ready...{Colors.ENDC}")
+            try:
+                result = subprocess.run([
+                    'kubectl', 'wait', '--for=condition=available',
+                    '--timeout=300s',
+                    'deployment/n8n',
+                    '-n', namespace
+                ], capture_output=True, text=True, timeout=310)
+
+                if result.returncode == 0:
+                    print(f"{Colors.OKGREEN}✓ n8n deployment is ready and available{Colors.ENDC}")
+                else:
+                    print(f"{Colors.WARNING}⚠ Deployment may not be fully ready yet{Colors.ENDC}")
+                    print(f"{Colors.WARNING}  Check status with: kubectl get pods -n {namespace}{Colors.ENDC}")
+            except subprocess.TimeoutExpired:
+                print(f"{Colors.WARNING}⚠ Timeout waiting for deployment readiness{Colors.ENDC}")
+                print(f"{Colors.WARNING}  Check status with: kubectl get pods -n {namespace}{Colors.ENDC}")
+            except Exception as e:
+                print(f"{Colors.WARNING}⚠ Could not verify deployment readiness: {e}{Colors.ENDC}")
         else:
             print(f"{Colors.FAIL}✗ n8n deployment failed{Colors.ENDC}")
             print(output)
@@ -798,13 +1075,14 @@ def get_loadbalancer_url(max_attempts: int = 30, delay: int = 10) -> Optional[st
     print(f"{Colors.FAIL}✗ LoadBalancer not ready after {max_attempts * delay} seconds{Colors.ENDC}")
     return None
 
-def configure_tls_interactive(config: DeploymentConfig, script_dir: Path, loadbalancer_url: str) -> bool:
+def configure_tls_interactive(config: DeploymentConfig, script_dir: Path, loadbalancer_url: str, namespace: str = "n8n") -> bool:
     """Interactive TLS configuration after deployment
 
     Args:
         config: Deployment configuration
         script_dir: Script directory path
         loadbalancer_url: LoadBalancer DNS name
+        namespace: Kubernetes namespace for n8n
 
     Returns:
         True if TLS was configured successfully
@@ -881,7 +1159,7 @@ def configure_tls_interactive(config: DeploymentConfig, script_dir: Path, loadba
 
             result = subprocess.run([
                 'kubectl', 'create', 'secret', 'tls', 'n8n-tls',
-                '-n', 'n8n',
+                '-n', namespace,
                 f'--cert={cert_path}',
                 f'--key={key_path}'
             ], capture_output=True, text=True)
@@ -1012,7 +1290,7 @@ spec:
     if config.tls_certificate_source == "letsencrypt":
         cert_manager_annotation = f"letsencrypt-{config.letsencrypt_environment}"
 
-    if helm_runner.upgrade_n8n_with_tls(config, encryption_key, "n8n", cert_manager_annotation):
+    if helm_runner.upgrade_n8n_with_tls(config, encryption_key, namespace, cert_manager_annotation):
         print(f"\n{Colors.OKGREEN}{Colors.BOLD}✅ TLS Configuration Complete!{Colors.ENDC}")
 
         if config.tls_certificate_source == "letsencrypt":
@@ -1021,8 +1299,8 @@ spec:
             print("=" * 60)
             print("Certificate issuance typically takes 2-5 minutes")
             print("\nMonitor certificate status:")
-            print(f"  {Colors.OKCYAN}kubectl get certificate -n n8n{Colors.ENDC}")
-            print(f"  {Colors.OKCYAN}kubectl describe certificate n8n-tls -n n8n{Colors.ENDC}")
+            print(f"  {Colors.OKCYAN}kubectl get certificate -n {namespace}{Colors.ENDC}")
+            print(f"  {Colors.OKCYAN}kubectl describe certificate n8n-tls -n {namespace}{Colors.ENDC}")
             print("\nOnce ready, access n8n at:")
             print(f"  {Colors.OKGREEN}https://{config.n8n_host}{Colors.ENDC}")
             print("=" * 60)
@@ -1033,6 +1311,173 @@ spec:
     else:
         print(f"\n{Colors.FAIL}TLS configuration failed{Colors.ENDC}")
         return False
+
+def configure_basic_auth_interactive(config: DeploymentConfig, script_dir: Path, namespace: str = "n8n") -> bool:
+    """Interactive basic authentication configuration after deployment
+
+    Args:
+        config: Deployment configuration
+        script_dir: Script directory path
+
+    Returns:
+        True if basic auth was configured successfully
+    """
+    print(f"\n{Colors.HEADER}{Colors.BOLD}Basic Authentication Configuration{Colors.ENDC}")
+    print("=" * 60)
+    print("Protect your n8n instance with basic authentication")
+    print()
+
+    prompt = ConfigurationPrompt()
+
+    if not prompt.prompt_yes_no("Would you like to enable basic authentication?", default=False):
+        print(f"\n{Colors.WARNING}Basic authentication skipped{Colors.ENDC}")
+        print("Your n8n instance will be publicly accessible")
+        return False
+
+    # Generate credentials
+    config.basic_auth_username = "admin"
+    config.basic_auth_password = secrets.token_urlsafe(12)[:12]  # 12 character random password
+
+    print(f"\n{Colors.OKGREEN}✓ Generated basic auth credentials{Colors.ENDC}")
+    print(f"\n{Colors.WARNING}{Colors.BOLD}⚠️  IMPORTANT - Save these credentials!{Colors.ENDC}")
+    print("=" * 60)
+    print(f"Username: {Colors.OKCYAN}{config.basic_auth_username}{Colors.ENDC}")
+    print(f"Password: {Colors.OKCYAN}{config.basic_auth_password}{Colors.ENDC}")
+    print("=" * 60)
+    print(f"{Colors.WARNING}These credentials will be required to access n8n{Colors.ENDC}")
+    print()
+
+    if not prompt.prompt_yes_no("Have you saved the credentials?", default=False):
+        print(f"\n{Colors.FAIL}Please save the credentials before continuing{Colors.ENDC}")
+        return False
+
+    # Store credentials in AWS Secrets Manager
+    print(f"\n{Colors.HEADER}Storing credentials in AWS Secrets Manager...{Colors.ENDC}")
+    try:
+        import boto3
+        import botocore
+
+        session = boto3.Session(profile_name=config.aws_profile, region_name=config.aws_region)
+        secrets_client = session.client('secretsmanager')
+
+        secret_value = json.dumps({
+            'username': config.basic_auth_username,
+            'password': config.basic_auth_password
+        })
+
+        try:
+            # Try to create the secret
+            secrets_client.create_secret(
+                Name='/n8n/basic-auth',
+                SecretString=secret_value,
+                Description='Basic authentication credentials for n8n ingress'
+            )
+            print(f"{Colors.OKGREEN}✓ Credentials stored in AWS Secrets Manager{Colors.ENDC}")
+        except secrets_client.exceptions.ResourceExistsException:
+            # Secret already exists, update it
+            secrets_client.put_secret_value(
+                SecretId='/n8n/basic-auth',
+                SecretString=secret_value
+            )
+            print(f"{Colors.OKGREEN}✓ Credentials updated in AWS Secrets Manager{Colors.ENDC}")
+
+    except Exception as e:
+        print(f"{Colors.FAIL}✗ Failed to store credentials in Secrets Manager: {e}{Colors.ENDC}")
+        print(f"{Colors.WARNING}Continuing with local credential storage only{Colors.ENDC}")
+
+    # Create htpasswd file content with bcrypt
+    print(f"\n{Colors.HEADER}Creating basic auth secret in Kubernetes...{Colors.ENDC}")
+    try:
+        # Try using htpasswd command (required for bcrypt)
+        try:
+            result = subprocess.run(
+                ['htpasswd', '-nB', config.basic_auth_username],
+                input=f"{config.basic_auth_password}\n{config.basic_auth_password}\n",
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode == 0:
+                auth_content = result.stdout.strip()
+            else:
+                raise Exception(f"htpasswd command failed: {result.stderr}")
+
+        except FileNotFoundError:
+            print(f"{Colors.FAIL}✗ htpasswd command not found{Colors.ENDC}")
+            print(f"\n{Colors.WARNING}Basic authentication requires htpasswd for bcrypt hashing.{Colors.ENDC}")
+            print(f"\nInstall apache2-utils (Debian/Ubuntu) or httpd-tools (RedHat/CentOS):")
+            print(f"  {Colors.OKCYAN}# Ubuntu/Debian:{Colors.ENDC}")
+            print(f"  {Colors.OKCYAN}sudo apt-get install apache2-utils{Colors.ENDC}")
+            print(f"  {Colors.OKCYAN}# RedHat/CentOS:{Colors.ENDC}")
+            print(f"  {Colors.OKCYAN}sudo yum install httpd-tools{Colors.ENDC}")
+            print(f"  {Colors.OKCYAN}# macOS:{Colors.ENDC}")
+            print(f"  {Colors.OKCYAN}brew install httpd{Colors.ENDC}")
+            return False
+        except subprocess.TimeoutExpired:
+            print(f"{Colors.FAIL}✗ htpasswd command timed out{Colors.ENDC}")
+            return False
+
+        # Create Kubernetes secret
+        result = subprocess.run([
+            'kubectl', 'create', 'secret', 'generic', 'n8n-basic-auth',
+            '-n', namespace,
+            f'--from-literal=auth={auth_content}'
+        ], capture_output=True, text=True)
+
+        if result.returncode == 0:
+            print(f"{Colors.OKGREEN}✓ Basic auth secret created in Kubernetes{Colors.ENDC}")
+        else:
+            # Secret might already exist, try to delete and recreate
+            subprocess.run(['kubectl', 'delete', 'secret', 'n8n-basic-auth', '-n', namespace],
+                         capture_output=True)
+            result = subprocess.run([
+                'kubectl', 'create', 'secret', 'generic', 'n8n-basic-auth',
+                '-n', namespace,
+                f'--from-literal=auth={auth_content}'
+            ], capture_output=True, text=True)
+
+            if result.returncode == 0:
+                print(f"{Colors.OKGREEN}✓ Basic auth secret created in Kubernetes{Colors.ENDC}")
+            else:
+                print(f"{Colors.FAIL}✗ Failed to create basic auth secret{Colors.ENDC}")
+                print(result.stderr)
+                return False
+
+    except Exception as e:
+        print(f"{Colors.FAIL}✗ Error creating basic auth secret: {e}{Colors.ENDC}")
+        return False
+
+    # Upgrade n8n Helm release with basic auth enabled
+    print(f"\n{Colors.HEADER}Enabling basic auth in n8n ingress...{Colors.ENDC}")
+    try:
+        result = subprocess.run([
+            'helm', 'upgrade', 'n8n', str(script_dir / 'helm'),
+            '-n', namespace,
+            '--reuse-values',
+            '--set', 'ingress.basicAuth.enabled=true',
+            '--set', 'ingress.basicAuth.secretName=n8n-basic-auth'
+        ], capture_output=True, text=True, timeout=180)
+
+        if result.returncode == 0:
+            print(f"{Colors.OKGREEN}✓ Basic auth enabled on n8n ingress{Colors.ENDC}")
+        else:
+            print(f"{Colors.FAIL}✗ Failed to enable basic auth{Colors.ENDC}")
+            print(result.stderr)
+            return False
+
+    except Exception as e:
+        print(f"{Colors.FAIL}✗ Error enabling basic auth: {e}{Colors.ENDC}")
+        return False
+
+    print(f"\n{Colors.OKGREEN}{Colors.BOLD}✅ Basic Authentication Configured!{Colors.ENDC}")
+    print("\n" + "=" * 60)
+    print(f"Basic auth is now required to access n8n")
+    print(f"Username: {Colors.OKCYAN}{config.basic_auth_username}{Colors.ENDC}")
+    print(f"Password: {Colors.OKCYAN}{config.basic_auth_password}{Colors.ENDC}")
+    print("=" * 60)
+
+    return True
 
 def main():
     """Main execution flow for N8N EKS deployment - 4 Phase Deployment"""
@@ -1055,6 +1500,23 @@ def main():
         deps_ok, missing = DependencyChecker.check_all_dependencies()
         if not deps_ok:
             sys.exit(1)
+
+        if args.configure_tls:
+            try:
+                config = load_existing_configuration(script_dir)
+            except Exception as e:
+                print(f"{Colors.FAIL}✗ Unable to load existing configuration: {e}{Colors.ENDC}")
+                print("Run the full deployment once before using --configure-tls.")
+                sys.exit(1)
+
+            loadbalancer_url = get_loadbalancer_url(max_attempts=30, delay=10)
+            if not loadbalancer_url:
+                print(f"{Colors.FAIL}✗ Unable to determine LoadBalancer hostname{Colors.ENDC}")
+                print("Ensure kubectl is pointed at your cluster and try again.")
+                sys.exit(1)
+
+            success = configure_tls_interactive(config, script_dir, loadbalancer_url)
+            sys.exit(0 if success else 1)
 
         # Collect configuration (skip TLS - will be configured after LoadBalancer is ready)
         print(f"\n{Colors.HEADER}Let's configure your EKS deployment...{Colors.ENDC}")
@@ -1082,8 +1544,15 @@ def main():
         if not tf_runner.init():
             raise Exception("Terraform initialization failed")
 
-        if not tf_runner.plan():
+        # Run plan and display summary
+        plan_success, plan_output = tf_runner.plan(display_output=True)
+        if not plan_success:
             raise Exception("Terraform plan failed")
+
+        # Ask user to confirm before applying
+        prompt = ConfigurationPrompt()
+        if not prompt.prompt_yes_no("\nProceed with Terraform apply?", default=True):
+            raise SetupInterrupted("User cancelled Terraform apply")
 
         if not tf_runner.apply():
             raise Exception("Terraform apply failed")
@@ -1118,8 +1587,18 @@ def main():
         if not encryption_key:
             raise Exception("Failed to retrieve encryption key from Terraform outputs")
 
-        # Deploy n8n without TLS initially
-        if not helm_runner.deploy_n8n(config, encryption_key, namespace="n8n", tls_enabled=False):
+        # Prepare database configuration from Terraform outputs
+        db_config = {
+            'database_type': outputs.get('database_type', 'sqlite'),
+            'rds_address': outputs.get('rds_address'),
+            'rds_port': outputs.get('rds_port'),
+            'rds_database_name': outputs.get('rds_database_name'),
+            'rds_username': outputs.get('rds_username'),
+            'rds_password': outputs.get('rds_password'),
+        }
+
+        # Deploy n8n without TLS initially (but with database configuration)
+        if not helm_runner.deploy_n8n(config, encryption_key, namespace="n8n", tls_enabled=False, db_config=db_config):
             raise Exception("n8n deployment failed")
 
         print(f"\n{Colors.OKGREEN}✓ n8n application deployed{Colors.ENDC}")
@@ -1151,20 +1630,24 @@ def main():
         print(f"\n{Colors.WARNING}⚠  Currently using HTTP (unencrypted){Colors.ENDC}\n")
 
         # ═══════════════════════════════════════════════════════════════
-        # PHASE 4: TLS Configuration (Optional)
+        # PHASE 4: TLS and Basic Auth Configuration (Optional)
         # ═══════════════════════════════════════════════════════════════
         if loadbalancer_url != "<pending>":
-            configure_tls_interactive(config, script_dir, loadbalancer_url)
+            # Configure TLS first
+            configure_tls_interactive(config, script_dir, loadbalancer_url, config.n8n_namespace)
+
+            # Then configure Basic Auth
+            configure_basic_auth_interactive(config, script_dir, config.n8n_namespace)
 
         # Show useful kubectl commands
         print(f"\n{Colors.BOLD}Useful Commands:{Colors.ENDC}")
-        print(f"  {Colors.OKCYAN}kubectl get pods -n n8n{Colors.ENDC}")
-        print(f"  {Colors.OKCYAN}kubectl get ingress -n n8n{Colors.ENDC}")
-        print(f"  {Colors.OKCYAN}kubectl logs -f deployment/n8n -n n8n{Colors.ENDC}")
+        print(f"  {Colors.OKCYAN}kubectl get pods -n {config.n8n_namespace}{Colors.ENDC}")
+        print(f"  {Colors.OKCYAN}kubectl get ingress -n {config.n8n_namespace}{Colors.ENDC}")
+        print(f"  {Colors.OKCYAN}kubectl logs -f deployment/n8n -n {config.n8n_namespace}{Colors.ENDC}")
         print(f"  {Colors.OKCYAN}kubectl get svc -n ingress-nginx{Colors.ENDC}")
 
         if config.tls_certificate_source in ["byo", "letsencrypt"]:
-            print(f"  {Colors.OKCYAN}kubectl get certificate -n n8n{Colors.ENDC}")
+            print(f"  {Colors.OKCYAN}kubectl get certificate -n {config.n8n_namespace}{Colors.ENDC}")
 
         print("\n" + "=" * 60)
 
