@@ -18,6 +18,8 @@ ingress:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
     # For Let's Encrypt, add:
     # cert-manager.io/cluster-issuer: "letsencrypt-production"
+  extraHosts: []
+  allowLoadBalancerHostname: true  # Respond to requests that use the raw ELB hostname
   tls:
     # Set to false for HTTP-only (no TLS)
     # Set to true when using BYO certificate or Let's Encrypt
@@ -26,6 +28,12 @@ ingress:
     # - For BYO: secret created by Terraform with user-provided cert
     # - For Let's Encrypt: secret created by cert-manager automatically
     secretName: n8n-tls
+  basicAuth:
+    # Enable basic authentication for ingress
+    enabled: false
+    # Name of the Kubernetes Secret containing auth credentials (htpasswd format)
+    # This secret is created by setup.py in Phase 4 when basic auth is enabled
+    secretName: n8n-basic-auth
 
 persistence:
   enabled: true
@@ -51,6 +59,20 @@ env:
 # Note: When deployed via Terraform, N8N_ENCRYPTION_KEY is automatically
 # set from AWS SSM Parameter Store (generated or user-provided)
 envSecrets: {}
+
+# Database configuration
+# Note: When deployed via Terraform with PostgreSQL, these values are
+# automatically set from terraform outputs (RDS endpoint, credentials, etc.)
+database:
+  # Type of database: sqlite (default) or postgresql
+  type: sqlite
+  # PostgreSQL configuration (only used when type = postgresql)
+  postgresql:
+    host: ""
+    port: 5432
+    database: "n8n"
+    user: ""
+    password: ""
 
 resources:
   requests:

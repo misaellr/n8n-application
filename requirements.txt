@@ -1,2 +1,0 @@
-# No external dependencies required
-# The setup script uses only Python standard library

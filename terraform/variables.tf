@@ -232,3 +232,55 @@ variable "n8n_env_overrides" {
   type        = map(string)
   default     = {}
 }
+
+########################################
+# Database Configuration
+########################################
+variable "database_type" {
+  description = "Database backend for n8n: 'sqlite' (default, file-based) or 'postgresql' (RDS)"
+  type        = string
+  default     = "sqlite"
+  validation {
+    condition     = contains(["sqlite", "postgresql"], var.database_type)
+    error_message = "database_type must be 'sqlite' or 'postgresql'"
+  }
+}
+
+variable "rds_instance_class" {
+  description = "RDS instance class (only used when database_type = postgresql)"
+  type        = string
+  default     = "db.t3.micro"
+}
+
+variable "rds_allocated_storage" {
+  description = "RDS allocated storage in GB (only used when database_type = postgresql)"
+  type        = number
+  default     = 20
+}
+
+variable "rds_multi_az" {
+  description = "Enable Multi-AZ deployment for RDS (only used when database_type = postgresql)"
+  type        = bool
+  default     = false
+}
+
+variable "rds_database_name" {
+  description = "Database name for RDS PostgreSQL"
+  type        = string
+  default     = "n8n"
+}
+
+variable "rds_username" {
+  description = "Master username for RDS PostgreSQL"
+  type        = string
+  default     = "n8n_user"
+}
+
+########################################
+# Basic Authentication Configuration
+########################################
+variable "enable_basic_auth" {
+  description = "Enable basic authentication for n8n ingress"
+  type        = bool
+  default     = false
+}

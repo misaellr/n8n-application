@@ -47,6 +47,23 @@ spec:
                   name: n8n-secrets
                   key: {{ $k }}
 {{- end }}
+{{- if eq .Values.database.type "postgresql" }}
+            - name: DB_TYPE
+              value: "postgresdb"
+            - name: DB_POSTGRESDB_HOST
+              value: "{{ .Values.database.postgresql.host }}"
+            - name: DB_POSTGRESDB_PORT
+              value: "{{ .Values.database.postgresql.port }}"
+            - name: DB_POSTGRESDB_DATABASE
+              value: "{{ .Values.database.postgresql.database }}"
+            - name: DB_POSTGRESDB_USER
+              value: "{{ .Values.database.postgresql.user }}"
+            - name: DB_POSTGRESDB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-db-credentials
+                  key: password
+{{- end }}
           volumeMounts:
             - name: n8n-data
               mountPath: /home/node/.n8n
