@@ -60,6 +60,8 @@ provider "helm" {
 locals {
   project_tag = var.project_tag
   azs         = slice(data.aws_availability_zones.available.names, 0, min(3, length(data.aws_availability_zones.available.names)))
+  # Use only 1 NAT gateway (in first AZ) to save on EIP usage
+  nat_gateway_count = 1
 }
 
 # Generate encryption key if not provided
@@ -150,7 +152,7 @@ resource "aws_subnet" "private" {
 }
 
 resource "aws_eip" "nat" {
-  count  = length(local.azs)
+  count  = local.nat_gateway_count
   domain = "vpc"
 
   tags = {
@@ -160,7 +162,7 @@ resource "aws_eip" "nat" {
 }
 
 resource "aws_nat_gateway" "main" {
-  count         = length(local.azs)
+  count         = local.nat_gateway_count
   allocation_id = aws_eip.nat[count.index].id
   subnet_id     = aws_subnet.public[count.index].id
 
@@ -198,7 +200,8 @@ resource "aws_route_table" "private" {
 
   route {
     cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.main[count.index].id
+    # All private subnets use the first (and only) NAT gateway
+    nat_gateway_id = aws_nat_gateway.main[0].id
   }
 
   tags = {
@@ -555,27 +558,12 @@ resource "helm_release" "nginx_ingress" {
 
   create_namespace = true
 
-  set {
-    name  = "controller.service.type"
-    value = "LoadBalancer"
-  }
-
-  set {
-    name  = "controller.service.annotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-type"
-    value = "nlb"
-  }
-
-  # Attach static Elastic IPs to the NLB
-  set {
-    name  = "controller.service.annotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-eip-allocations"
-    value = join(",", aws_eip.nlb[*].id)
-  }
-
-  # Specify public subnets for the NLB
-  set {
-    name  = "controller.service.annotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-subnets"
-    value = join(",", aws_subnet.public[*].id)
-  }
+  values = [
+    templatefile("${path.module}/nginx-ingress-values.tpl", {
+      nlb_eips    = join(",", aws_eip.nlb[*].id)
+      nlb_subnets = join(",", aws_subnet.public[*].id)
+    })
+  ]
 
   depends_on = [
     aws_eks_node_group.main,
@@ -588,9 +576,10 @@ resource "helm_release" "nginx_ingress" {
 # RDS PostgreSQL (Optional - only when database_type = postgresql)
 ########################################
 resource "random_password" "rds_password" {
-  count   = var.database_type == "postgresql" ? 1 : 0
-  length  = 32
-  special = true
+  count            = var.database_type == "postgresql" ? 1 : 0
+  length           = 32
+  special          = true
+  override_special = "!#$%&*()-_=+[]{}<>:?"
 }
 
 resource "aws_db_subnet_group" "n8n" {
@@ -636,7 +625,7 @@ resource "aws_db_instance" "n8n" {
   count                  = var.database_type == "postgresql" ? 1 : 0
   identifier             = "${local.project_tag}-postgres"
   engine                 = "postgres"
-  engine_version         = "15.4"
+  engine_version         = "15.14"
   instance_class         = var.rds_instance_class
   allocated_storage      = var.rds_allocated_storage
   storage_type           = "gp3"
@@ -663,9 +652,10 @@ resource "aws_db_instance" "n8n" {
 ########################################
 # Store RDS credentials (only when using PostgreSQL)
 resource "aws_secretsmanager_secret" "db_credentials" {
-  count       = var.database_type == "postgresql" ? 1 : 0
-  name        = "/n8n/db-credentials"
-  description = "RDS PostgreSQL credentials for n8n"
+  count                   = var.database_type == "postgresql" ? 1 : 0
+  name                    = "/n8n/db-credentials"
+  description             = "RDS PostgreSQL credentials for n8n"
+  recovery_window_in_days = 0  # Force immediate deletion on destroy
 
   tags = {
     Project = local.project_tag
@@ -688,9 +678,10 @@ resource "aws_secretsmanager_secret_version" "db_credentials" {
 # Store basic auth credentials (only when basic auth is enabled)
 # Note: This is a placeholder - actual credentials are generated and stored by setup.py in Phase 4
 resource "aws_secretsmanager_secret" "basic_auth" {
-  count       = var.enable_basic_auth ? 1 : 0
-  name        = "/n8n/basic-auth"
-  description = "Basic authentication credentials for n8n ingress"
+  count                   = var.enable_basic_auth ? 1 : 0
+  name                    = "/n8n/basic-auth"
+  description             = "Basic authentication credentials for n8n ingress"
+  recovery_window_in_days = 0  # Force immediate deletion on destroy
 
   tags = {
     Project = local.project_tag

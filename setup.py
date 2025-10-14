@@ -48,6 +48,7 @@ class DeploymentConfig:
         self.timezone: str = "America/Bahia"
         self.n8n_encryption_key: str = ""
         self.n8n_persistence_size: str = "10Gi"
+        self.enable_nginx_ingress: bool = True
 
         # TLS Configuration
         self.tls_certificate_source: str = "none"  # "none", "byo", or "letsencrypt"
@@ -80,6 +81,7 @@ class DeploymentConfig:
             'n8n_host': self.n8n_host,
             'timezone': self.timezone,
             'n8n_persistence_size': self.n8n_persistence_size,
+            'enable_nginx_ingress': self.enable_nginx_ingress,
             'tls_certificate_source': self.tls_certificate_source,
             'letsencrypt_email': self.letsencrypt_email,
             'letsencrypt_environment': self.letsencrypt_environment,
@@ -229,6 +231,7 @@ class DependencyChecker:
             return False, outdated
 
         print(f"\n{Colors.OKGREEN}✓ All dependencies satisfied{Colors.ENDC}")
+        return True, []
 
 class CertificateValidator:
     """Validates TLS certificates in PEM format"""
@@ -751,12 +754,18 @@ class FileUpdater:
 
         content = variables_file.read_text()
 
-        # Update defaults
-        content = self._update_variable_default(content, "aws_profile", config.aws_profile)
-        content = self._update_variable_default(content, "region", config.aws_region)
-        content = self._update_variable_default(content, "instance_type", config.instance_type)
-        content = self._update_variable_default(content, "domain", config.domain)
-        content = self._update_variable_default(content, "timezone", config.timezone)
+        replacements = {
+            "region": config.aws_region,
+            "cluster_name": config.cluster_name,
+            "n8n_namespace": config.n8n_namespace,
+            "n8n_host": config.n8n_host,
+            "timezone": config.timezone,
+            "n8n_persistence_size": config.n8n_persistence_size,
+        }
+
+        for var_name, value in replacements.items():
+            if value:
+                content = self._update_variable_default(content, var_name, str(value))
 
         variables_file.write_text(content)
         print(f"{Colors.OKGREEN}✓ Updated terraform/variables.tf{Colors.ENDC}")
@@ -780,6 +789,7 @@ class FileUpdater:
             f'n8n_encryption_key = "{config.n8n_encryption_key}"',
             f'n8n_namespace      = "{config.n8n_namespace}"',
             f'n8n_persistence_size = "{config.n8n_persistence_size}"',
+            f'enable_nginx_ingress = {"true" if config.enable_nginx_ingress else "false"}',
             "",
             "# Database Configuration",
             f'database_type      = "{config.database_type}"',
@@ -860,6 +870,9 @@ class FileUpdater:
         self.create_backup()
 
         try:
+            # Keep Terraform and Helm defaults aligned with the chosen configuration
+            self.update_terraform_variables(config)
+            self.update_helm_values(config)
             # Create terraform.tfvars
             self.create_terraform_tfvars(config)
 
@@ -906,12 +919,22 @@ def load_existing_configuration(script_dir: Path) -> DeploymentConfig:
             config.node_instance_types = list(parsed) if isinstance(parsed, list) else [str(parsed)]
         elif key == 'node_desired_size':
             config.node_desired_size = int(parsed)
+        elif key == 'node_min_size':
+            config.node_min_size = int(parsed)
+        elif key == 'node_max_size':
+            config.node_max_size = int(parsed)
         elif key == 'n8n_host':
             config.n8n_host = str(parsed)
         elif key == 'timezone':
             config.timezone = str(parsed)
         elif key == 'n8n_encryption_key':
             config.n8n_encryption_key = str(parsed)
+        elif key == 'n8n_namespace':
+            config.n8n_namespace = str(parsed)
+        elif key == 'n8n_persistence_size':
+            config.n8n_persistence_size = str(parsed)
+        elif key == 'enable_nginx_ingress':
+            config.enable_nginx_ingress = bool(parsed)
 
     if not config.n8n_host:
         raise ValueError("n8n_host is missing in terraform.tfvars")
@@ -1077,6 +1100,23 @@ class HelmRunner:
 
             # Create Kubernetes Secret for database credentials
             try:
+                # Ensure namespace exists before creating secret
+                namespace_check = subprocess.run(
+                    ['kubectl', 'get', 'namespace', namespace],
+                    capture_output=True
+                )
+                if namespace_check.returncode != 0:
+                    # Create namespace if it doesn't exist
+                    result = subprocess.run(
+                        ['kubectl', 'create', 'namespace', namespace],
+                        capture_output=True, text=True
+                    )
+                    if result.returncode != 0:
+                        print(f"{Colors.FAIL}✗ Failed to create namespace {namespace}{Colors.ENDC}")
+                        print(result.stderr)
+                        return False
+                    print(f"{Colors.OKGREEN}  ✓ Created namespace {namespace}{Colors.ENDC}")
+
                 # Check if secret already exists and delete it
                 subprocess.run(
                     ['kubectl', 'delete', 'secret', 'n8n-db-credentials', '-n', namespace],
@@ -1546,7 +1586,10 @@ def configure_basic_auth_interactive(config: DeploymentConfig, script_dir: Path,
 
     # Generate credentials
     config.basic_auth_username = "admin"
-    config.basic_auth_password = secrets.token_urlsafe(12)[:12]  # 12 character random password
+    import string
+
+    alphabet = string.ascii_letters + string.digits
+    config.basic_auth_password = ''.join(secrets.choice(alphabet) for _ in range(12))
 
     print(f"\n{Colors.OKGREEN}✓ Generated basic auth credentials{Colors.ENDC}")
     print(f"\n{Colors.WARNING}{Colors.BOLD}⚠️  IMPORTANT - Save these credentials!{Colors.ENDC}")
@@ -1894,6 +1937,8 @@ def main():
 
     except Exception as e:
         print(f"\n{Colors.FAIL}Error: {e}{Colors.ENDC}")
+        import traceback
+        traceback.print_exc()
         if 'updater' in locals():
             updater.restore_backup()
             updater.cleanup_backup()
