@@ -1759,6 +1759,8 @@ def main():
     parser = argparse.ArgumentParser(description='N8N EKS Deployment Setup')
     parser.add_argument('--configure-tls', action='store_true',
                        help='Configure TLS for existing n8n deployment')
+    parser.add_argument('--skip-terraform', action='store_true',
+                       help='Skip Terraform infrastructure deployment and start from application deployment (assumes infrastructure already exists)')
     args = parser.parse_args()
 
     script_dir = Path(__file__).parent
@@ -1792,62 +1794,110 @@ def main():
             success = configure_tls_interactive(config, script_dir, loadbalancer_url)
             sys.exit(0 if success else 1)
 
-        # Collect configuration (skip TLS - will be configured after LoadBalancer is ready)
-        print(f"\n{Colors.HEADER}Let's configure your EKS deployment...{Colors.ENDC}")
-        prompt = ConfigurationPrompt()
-        config = prompt.collect_configuration(skip_tls=True)
+        if args.skip_terraform:
+            # Load existing configuration and skip to Phase 2
+            print(f"\n{Colors.WARNING}⚡ Skip-Terraform Mode Enabled{Colors.ENDC}")
+            print(f"{Colors.OKCYAN}Assuming infrastructure is already deployed...{Colors.ENDC}\n")
 
-        # Update configuration files
-        updater = FileUpdater(script_dir)
-        updater.apply_configuration(config)
+            try:
+                config = load_existing_configuration(script_dir)
+                print(f"{Colors.OKGREEN}✓ Loaded configuration from terraform.tfvars{Colors.ENDC}")
+            except Exception as e:
+                print(f"{Colors.FAIL}✗ Unable to load existing configuration: {e}{Colors.ENDC}")
+                print("Run the full deployment once before using --skip-terraform.")
+                sys.exit(1)
 
-        # ═══════════════════════════════════════════════════════════════
-        # PHASE 1: Deploy Infrastructure (Terraform)
-        # ═══════════════════════════════════════════════════════════════
-        print(f"\n{Colors.HEADER}{Colors.BOLD}📦 PHASE 1: Deploying Infrastructure{Colors.ENDC}")
-        print("=" * 60)
-        print("This will create:")
-        print("  • VPC, subnets, NAT gateways (~5 minutes)")
-        print("  • EKS cluster and node group (~15-20 minutes)")
-        print("  • NGINX ingress controller with LoadBalancer (~2 minutes)")
-        print("  • EBS CSI driver and StorageClass")
-        print(f"\n{Colors.WARNING}⏱  Estimated time: ~22-27 minutes{Colors.ENDC}\n")
+            tf_runner = TerraformRunner(script_dir / "terraform")
 
-        tf_runner = TerraformRunner(script_dir / "terraform")
+            # Verify Terraform state exists
+            tfstate_path = script_dir / "terraform" / "terraform.tfstate"
+            if not tfstate_path.exists():
+                print(f"{Colors.FAIL}✗ Terraform state not found{Colors.ENDC}")
+                print("Infrastructure must be deployed first. Run without --skip-terraform.")
+                sys.exit(1)
 
-        if not tf_runner.init():
-            raise Exception("Terraform initialization failed")
+            print(f"{Colors.OKGREEN}✓ Terraform state found{Colors.ENDC}")
 
-        # Run plan and display summary
-        plan_success, plan_output = tf_runner.plan(display_output=True)
-        if not plan_success:
-            raise Exception("Terraform plan failed")
+            # Get outputs from existing Terraform state
+            print(f"\n{Colors.HEADER}📊 Reading Terraform outputs...{Colors.ENDC}")
+            outputs = tf_runner.get_outputs()
 
-        # Ask user to confirm before applying
-        prompt = ConfigurationPrompt()
-        if not prompt.prompt_yes_no("\nProceed with Terraform apply?", default=True):
-            raise SetupInterrupted("User cancelled Terraform apply")
+            if not outputs:
+                print(f"{Colors.FAIL}✗ Unable to read Terraform outputs{Colors.ENDC}")
+                print("Ensure Terraform has been applied successfully.")
+                sys.exit(1)
 
-        if not tf_runner.apply():
-            raise Exception("Terraform apply failed")
+            print(f"{Colors.OKGREEN}✓ Retrieved Terraform outputs{Colors.ENDC}")
 
-        print(f"\n{Colors.OKGREEN}✓ Infrastructure deployed successfully{Colors.ENDC}")
+            # Configure kubectl if needed
+            if 'configure_kubectl' in outputs:
+                print(f"\n{Colors.HEADER}🔧 Configuring kubectl...{Colors.ENDC}")
+                kubectl_cmd = outputs['configure_kubectl']
+                result = subprocess.run(kubectl_cmd, shell=True, capture_output=True, text=True)
 
-        # Get outputs
-        outputs = tf_runner.get_outputs()
+                if result.returncode == 0:
+                    print(f"{Colors.OKGREEN}✓ kubectl configured{Colors.ENDC}")
+                else:
+                    print(f"{Colors.WARNING}⚠  kubectl configuration failed. Run manually:{Colors.ENDC}")
+                    print(f"  {Colors.OKCYAN}{kubectl_cmd}{Colors.ENDC}")
+                    raise Exception("kubectl configuration required")
+        else:
+            # Collect configuration (skip TLS - will be configured after LoadBalancer is ready)
+            print(f"\n{Colors.HEADER}Let's configure your EKS deployment...{Colors.ENDC}")
+            prompt = ConfigurationPrompt()
+            config = prompt.collect_configuration(skip_tls=True)
 
-        # Configure kubectl
-        if 'configure_kubectl' in outputs:
-            print(f"\n{Colors.HEADER}🔧 Configuring kubectl...{Colors.ENDC}")
-            kubectl_cmd = outputs['configure_kubectl']
-            result = subprocess.run(kubectl_cmd, shell=True, capture_output=True, text=True)
+            # Update configuration files
+            updater = FileUpdater(script_dir)
+            updater.apply_configuration(config)
 
-            if result.returncode == 0:
-                print(f"{Colors.OKGREEN}✓ kubectl configured{Colors.ENDC}")
-            else:
-                print(f"{Colors.WARNING}⚠  kubectl configuration failed. Run manually:{Colors.ENDC}")
-                print(f"  {Colors.OKCYAN}{kubectl_cmd}{Colors.ENDC}")
-                raise Exception("kubectl configuration required")
+            # ═══════════════════════════════════════════════════════════════
+            # PHASE 1: Deploy Infrastructure (Terraform)
+            # ═══════════════════════════════════════════════════════════════
+            print(f"\n{Colors.HEADER}{Colors.BOLD}📦 PHASE 1: Deploying Infrastructure{Colors.ENDC}")
+            print("=" * 60)
+            print("This will create:")
+            print("  • VPC, subnets, NAT gateways (~5 minutes)")
+            print("  • EKS cluster and node group (~15-20 minutes)")
+            print("  • NGINX ingress controller with LoadBalancer (~2 minutes)")
+            print("  • EBS CSI driver and StorageClass")
+            print(f"\n{Colors.WARNING}⏱  Estimated time: ~22-27 minutes{Colors.ENDC}\n")
+
+            tf_runner = TerraformRunner(script_dir / "terraform")
+
+            if not tf_runner.init():
+                raise Exception("Terraform initialization failed")
+
+            # Run plan and display summary
+            plan_success, plan_output = tf_runner.plan(display_output=True)
+            if not plan_success:
+                raise Exception("Terraform plan failed")
+
+            # Ask user to confirm before applying
+            prompt = ConfigurationPrompt()
+            if not prompt.prompt_yes_no("\nProceed with Terraform apply?", default=True):
+                raise SetupInterrupted("User cancelled Terraform apply")
+
+            if not tf_runner.apply():
+                raise Exception("Terraform apply failed")
+
+            print(f"\n{Colors.OKGREEN}✓ Infrastructure deployed successfully{Colors.ENDC}")
+
+            # Get outputs
+            outputs = tf_runner.get_outputs()
+
+            # Configure kubectl
+            if 'configure_kubectl' in outputs:
+                print(f"\n{Colors.HEADER}🔧 Configuring kubectl...{Colors.ENDC}")
+                kubectl_cmd = outputs['configure_kubectl']
+                result = subprocess.run(kubectl_cmd, shell=True, capture_output=True, text=True)
+
+                if result.returncode == 0:
+                    print(f"{Colors.OKGREEN}✓ kubectl configured{Colors.ENDC}")
+                else:
+                    print(f"{Colors.WARNING}⚠  kubectl configuration failed. Run manually:{Colors.ENDC}")
+                    print(f"  {Colors.OKCYAN}{kubectl_cmd}{Colors.ENDC}")
+                    raise Exception("kubectl configuration required")
 
         # ═══════════════════════════════════════════════════════════════
         # PHASE 2: Deploy n8n Application (Helm)
@@ -1925,8 +1975,9 @@ def main():
 
         print("\n" + "=" * 60)
 
-        # Cleanup backup on success
-        updater.cleanup_backup()
+        # Cleanup backup on success (only if updater was created)
+        if 'updater' in locals():
+            updater.cleanup_backup()
 
     except SetupInterrupted as e:
         print(f"\n{Colors.WARNING}{e}{Colors.ENDC}")
