@@ -1147,6 +1147,9 @@ class HelmRunner:
                 '--set', f'database.postgresql.database={db_config.get("rds_database_name", "n8n")}',
                 '--set', f'database.postgresql.user={db_config.get("rds_username", "")}',
                 # Password will be read from secret, not passed here
+                # Enable SSL for RDS connections (required by AWS RDS)
+                '--set', 'env.DB_POSTGRESDB_SSL_ENABLED=true',
+                '--set', 'env.DB_POSTGRESDB_SSL_REJECT_UNAUTHORIZED=false',
             ])
         else:
             # Default to SQLite
