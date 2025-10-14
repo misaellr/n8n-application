@@ -25,6 +25,7 @@ class Colors:
     OKGREEN = '\033[92m'   # Green for success messages
     WARNING = '\033[93m'   # Yellow for warnings
     FAIL = '\033[91m'      # Red for errors
+    RED = '\033[91m'       # Red (alias for compatibility)
     ENDC = '\033[0m'
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
@@ -1756,6 +1757,459 @@ def configure_basic_auth_interactive(config: DeploymentConfig, script_dir: Path,
 
     return True
 
+class TeardownRunner:
+    """Handles teardown of N8N EKS deployment"""
+
+    def __init__(self, script_dir: Path, config: DeploymentConfig):
+        self.script_dir = script_dir
+        self.config = config
+        self.terraform_dir = script_dir / "terraform"
+
+    def phase1_helm_releases(self) -> bool:
+        """Phase 1: Uninstall Helm releases"""
+        print(f"\n{Colors.HEADER}{Colors.BOLD}📦 PHASE 1: Uninstalling Helm Releases{Colors.ENDC}")
+        print("=" * 60)
+
+        # Check if cluster is accessible
+        try:
+            result = subprocess.run(
+                ['kubectl', 'cluster-info'],
+                capture_output=True,
+                timeout=10
+            )
+            if result.returncode != 0:
+                print(f"{Colors.WARNING}⚠  Cluster not accessible, skipping Helm cleanup{Colors.ENDC}")
+                print(f"{Colors.WARNING}  If cluster still exists, manually uninstall: helm uninstall n8n -n {self.config.n8n_namespace}{Colors.ENDC}")
+                return True
+        except Exception as e:
+            print(f"{Colors.WARNING}⚠  Cannot verify cluster access: {e}{Colors.ENDC}")
+            return True
+
+        success = True
+
+        # Uninstall n8n
+        print(f"\n{Colors.OKCYAN}Checking for n8n Helm release...{Colors.ENDC}")
+        try:
+            result = subprocess.run(
+                ['helm', 'list', '-n', self.config.n8n_namespace, '-o', 'json'],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode == 0:
+                releases = json.loads(result.stdout) if result.stdout.strip() else []
+                n8n_found = any(r.get('name') == 'n8n' for r in releases)
+
+                if n8n_found:
+                    print(f"{Colors.OKCYAN}  Uninstalling n8n...{Colors.ENDC}")
+                    result = subprocess.run(
+                        ['helm', 'uninstall', 'n8n', '-n', self.config.n8n_namespace],
+                        capture_output=True,
+                        text=True,
+                        timeout=60
+                    )
+                    if result.returncode == 0:
+                        print(f"{Colors.OKGREEN}  ✓ n8n uninstalled{Colors.ENDC}")
+                    else:
+                        print(f"{Colors.FAIL}  ✗ Failed to uninstall n8n{Colors.ENDC}")
+                        print(f"  {result.stderr}")
+                        success = False
+                else:
+                    print(f"{Colors.OKCYAN}  n8n Helm release not found{Colors.ENDC}")
+        except Exception as e:
+            print(f"{Colors.WARNING}  Error checking n8n release: {e}{Colors.ENDC}")
+            success = False
+
+        # Uninstall ingress-nginx
+        print(f"\n{Colors.OKCYAN}Checking for ingress-nginx Helm release...{Colors.ENDC}")
+        try:
+            result = subprocess.run(
+                ['helm', 'list', '-n', 'ingress-nginx', '-o', 'json'],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode == 0:
+                releases = json.loads(result.stdout) if result.stdout.strip() else []
+                nginx_found = any(r.get('name') == 'ingress-nginx' for r in releases)
+
+                if nginx_found:
+                    print(f"{Colors.OKCYAN}  Uninstalling ingress-nginx...{Colors.ENDC}")
+                    result = subprocess.run(
+                        ['helm', 'uninstall', 'ingress-nginx', '-n', 'ingress-nginx'],
+                        capture_output=True,
+                        text=True,
+                        timeout=60
+                    )
+                    if result.returncode == 0:
+                        print(f"{Colors.OKGREEN}  ✓ ingress-nginx uninstalled{Colors.ENDC}")
+                        print(f"{Colors.OKCYAN}  Waiting for LoadBalancer to be deleted...{Colors.ENDC}")
+                        import time
+                        time.sleep(30)
+                    else:
+                        print(f"{Colors.FAIL}  ✗ Failed to uninstall ingress-nginx{Colors.ENDC}")
+                        print(f"  {result.stderr}")
+                        success = False
+                else:
+                    print(f"{Colors.OKCYAN}  ingress-nginx Helm release not found{Colors.ENDC}")
+        except Exception as e:
+            print(f"{Colors.WARNING}  Error checking ingress-nginx release: {e}{Colors.ENDC}")
+            success = False
+
+        # Uninstall cert-manager if exists
+        print(f"\n{Colors.OKCYAN}Checking for cert-manager Helm release...{Colors.ENDC}")
+        try:
+            result = subprocess.run(
+                ['helm', 'list', '-n', 'cert-manager', '-o', 'json'],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode == 0:
+                releases = json.loads(result.stdout) if result.stdout.strip() else []
+                cert_manager_found = any(r.get('name') == 'cert-manager' for r in releases)
+
+                if cert_manager_found:
+                    print(f"{Colors.OKCYAN}  Uninstalling cert-manager...{Colors.ENDC}")
+                    result = subprocess.run(
+                        ['helm', 'uninstall', 'cert-manager', '-n', 'cert-manager'],
+                        capture_output=True,
+                        text=True,
+                        timeout=60
+                    )
+                    if result.returncode == 0:
+                        print(f"{Colors.OKGREEN}  ✓ cert-manager uninstalled{Colors.ENDC}")
+                    else:
+                        print(f"{Colors.FAIL}  ✗ Failed to uninstall cert-manager{Colors.ENDC}")
+                        print(f"  {result.stderr}")
+                else:
+                    print(f"{Colors.OKCYAN}  cert-manager Helm release not found{Colors.ENDC}")
+        except Exception as e:
+            print(f"{Colors.WARNING}  Error checking cert-manager release: {e}{Colors.ENDC}")
+
+        return success
+
+    def phase2_kubernetes_resources(self) -> bool:
+        """Phase 2: Clean Kubernetes resources"""
+        print(f"\n{Colors.HEADER}{Colors.BOLD}🧹 PHASE 2: Cleaning Kubernetes Resources{Colors.ENDC}")
+        print("=" * 60)
+
+        # Check if cluster is accessible
+        try:
+            result = subprocess.run(
+                ['kubectl', 'cluster-info'],
+                capture_output=True,
+                timeout=10
+            )
+            if result.returncode != 0:
+                print(f"{Colors.WARNING}⚠  Cluster not accessible, skipping Kubernetes cleanup{Colors.ENDC}")
+                return True
+        except Exception:
+            print(f"{Colors.WARNING}⚠  Cannot verify cluster access, skipping Kubernetes cleanup{Colors.ENDC}")
+            return True
+
+        # Delete PVCs
+        print(f"\n{Colors.OKCYAN}Deleting PersistentVolumeClaims...{Colors.ENDC}")
+        try:
+            result = subprocess.run(
+                ['kubectl', 'get', 'namespace', self.config.n8n_namespace],
+                capture_output=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                result = subprocess.run(
+                    ['kubectl', 'delete', 'pvc', '--all', '-n', self.config.n8n_namespace, '--timeout=60s'],
+                    capture_output=True,
+                    text=True,
+                    timeout=70
+                )
+                if result.returncode == 0:
+                    print(f"{Colors.OKGREEN}  ✓ PVCs deleted{Colors.ENDC}")
+                else:
+                    print(f"{Colors.OKCYAN}  No PVCs found or already deleted{Colors.ENDC}")
+        except Exception as e:
+            print(f"{Colors.WARNING}  Error deleting PVCs: {e}{Colors.ENDC}")
+
+        # Delete secrets
+        print(f"\n{Colors.OKCYAN}Deleting manual secrets...{Colors.ENDC}")
+        for secret_name in ['n8n-basic-auth', 'n8n-tls', 'n8n-db-credentials']:
+            try:
+                subprocess.run(
+                    ['kubectl', 'delete', 'secret', secret_name, '-n', self.config.n8n_namespace],
+                    capture_output=True,
+                    timeout=10
+                )
+            except Exception:
+                pass
+        print(f"{Colors.OKGREEN}  ✓ Secrets cleanup complete{Colors.ENDC}")
+
+        # Delete namespaces
+        print(f"\n{Colors.OKCYAN}Deleting namespaces...{Colors.ENDC}")
+        for namespace in [self.config.n8n_namespace, 'ingress-nginx', 'cert-manager']:
+            try:
+                result = subprocess.run(
+                    ['kubectl', 'get', 'namespace', namespace],
+                    capture_output=True,
+                    timeout=10
+                )
+                if result.returncode == 0:
+                    print(f"{Colors.OKCYAN}  Deleting namespace: {namespace}...{Colors.ENDC}")
+                    result = subprocess.run(
+                        ['kubectl', 'delete', 'namespace', namespace, '--timeout=120s'],
+                        capture_output=True,
+                        text=True,
+                        timeout=130
+                    )
+                    if result.returncode == 0:
+                        print(f"{Colors.OKGREEN}    ✓ {namespace} deleted{Colors.ENDC}")
+                    else:
+                        print(f"{Colors.WARNING}    ⚠ {namespace} deletion timeout or error{Colors.ENDC}")
+            except Exception as e:
+                print(f"{Colors.WARNING}  Error with namespace {namespace}: {e}{Colors.ENDC}")
+
+        return True
+
+    def phase3_terraform_destroy(self) -> bool:
+        """Phase 3: Destroy Terraform infrastructure"""
+        print(f"\n{Colors.HEADER}{Colors.BOLD}💥 PHASE 3: Destroying Terraform Infrastructure{Colors.ENDC}")
+        print("=" * 60)
+
+        tfstate_path = self.terraform_dir / "terraform.tfstate"
+        if not tfstate_path.exists():
+            print(f"{Colors.WARNING}⚠  No Terraform state found, skipping infrastructure destruction{Colors.ENDC}")
+            print(f"{Colors.WARNING}  If resources exist in AWS, manually run: cd terraform && terraform destroy{Colors.ENDC}")
+            return True
+
+        # Detect AWS region
+        aws_region = self.config.aws_region or "us-east-1"
+
+        # Check for RDS deletion protection
+        print(f"\n{Colors.OKCYAN}Checking for RDS deletion protection...{Colors.ENDC}")
+        try:
+            result = subprocess.run(
+                ['terraform', '-chdir=' + str(self.terraform_dir), 'state', 'list'],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode == 0 and 'aws_db_instance' in result.stdout:
+                print(f"{Colors.OKCYAN}  RDS instance detected, checking deletion protection...{Colors.ENDC}")
+
+                # Get RDS instance ID from state
+                rds_resources = [line for line in result.stdout.split('\n') if 'aws_db_instance' in line]
+                if rds_resources:
+                    rds_resource = rds_resources[0]
+
+                    # Show the RDS resource details
+                    result = subprocess.run(
+                        ['terraform', '-chdir=' + str(self.terraform_dir), 'state', 'show', rds_resource],
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+
+                    if result.returncode == 0:
+                        # Extract RDS ID from the output
+                        for line in result.stdout.split('\n'):
+                            if 'identifier ' in line and '=' in line:
+                                rds_id = line.split('=')[1].strip().strip('"')
+
+                                # Check deletion protection via AWS CLI
+                                try:
+                                    check_result = subprocess.run(
+                                        ['aws', 'rds', 'describe-db-instances',
+                                         '--db-instance-identifier', rds_id,
+                                         '--region', aws_region,
+                                         '--query', 'DBInstances[0].DeletionProtection',
+                                         '--output', 'text'],
+                                        capture_output=True,
+                                        text=True,
+                                        timeout=30,
+                                        env={**os.environ, 'AWS_PROFILE': self.config.aws_profile}
+                                    )
+
+                                    if check_result.returncode == 0 and check_result.stdout.strip().upper() == 'TRUE':
+                                        print(f"{Colors.WARNING}  ⚠ RDS deletion protection is enabled{Colors.ENDC}")
+                                        print(f"{Colors.OKCYAN}  Disabling deletion protection...{Colors.ENDC}")
+
+                                        mod_result = subprocess.run(
+                                            ['aws', 'rds', 'modify-db-instance',
+                                             '--db-instance-identifier', rds_id,
+                                             '--no-deletion-protection',
+                                             '--apply-immediately',
+                                             '--region', aws_region],
+                                            capture_output=True,
+                                            text=True,
+                                            timeout=30,
+                                            env={**os.environ, 'AWS_PROFILE': self.config.aws_profile}
+                                        )
+
+                                        if mod_result.returncode == 0:
+                                            print(f"{Colors.OKGREEN}    ✓ Deletion protection disabled{Colors.ENDC}")
+                                            import time
+                                            time.sleep(10)
+                                        else:
+                                            print(f"{Colors.WARNING}    ⚠ Could not disable deletion protection{Colors.ENDC}")
+                                except Exception as e:
+                                    print(f"{Colors.WARNING}  Could not check/disable deletion protection: {e}{Colors.ENDC}")
+                                break
+        except Exception as e:
+            print(f"{Colors.WARNING}  Error checking RDS: {e}{Colors.ENDC}")
+
+        # Run terraform destroy
+        print(f"\n{Colors.WARNING}{Colors.BOLD}⚠️  Running Terraform Destroy{Colors.ENDC}")
+        print(f"{Colors.WARNING}This will permanently delete all infrastructure resources!{Colors.ENDC}\n")
+
+        try:
+            result = subprocess.run(
+                ['terraform', '-chdir=' + str(self.terraform_dir), 'destroy'],
+                timeout=1800  # 30 minutes timeout
+            )
+
+            if result.returncode == 0:
+                print(f"\n{Colors.OKGREEN}✓ Terraform infrastructure destroyed{Colors.ENDC}")
+                return True
+            else:
+                print(f"\n{Colors.FAIL}✗ Terraform destroy failed{Colors.ENDC}")
+                return False
+        except subprocess.TimeoutExpired:
+            print(f"\n{Colors.FAIL}✗ Terraform destroy timed out{Colors.ENDC}")
+            return False
+        except Exception as e:
+            print(f"\n{Colors.FAIL}✗ Error running terraform destroy: {e}{Colors.ENDC}")
+            return False
+
+    def phase4_secrets_manager(self) -> bool:
+        """Phase 4: Clean AWS Secrets Manager"""
+        print(f"\n{Colors.HEADER}{Colors.BOLD}🔐 PHASE 4: Cleaning AWS Secrets Manager{Colors.ENDC}")
+        print("=" * 60)
+
+        aws_region = self.config.aws_region or "us-east-1"
+
+        print(f"\n{Colors.OKCYAN}Searching for n8n-related secrets...{Colors.ENDC}")
+        try:
+            result = subprocess.run(
+                ['aws', 'secretsmanager', 'list-secrets',
+                 '--region', aws_region,
+                 '--query', 'SecretList[?contains(Name, `n8n`)].Name',
+                 '--output', 'json'],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env={**os.environ, 'AWS_PROFILE': self.config.aws_profile}
+            )
+
+            if result.returncode == 0:
+                secrets = json.loads(result.stdout) if result.stdout.strip() else []
+
+                if not secrets:
+                    print(f"{Colors.OKCYAN}  No n8n-related secrets found{Colors.ENDC}")
+                else:
+                    print(f"{Colors.OKCYAN}  Found {len(secrets)} secret(s):{Colors.ENDC}")
+                    for secret in secrets:
+                        print(f"    - {secret}")
+
+                    prompt = ConfigurationPrompt()
+                    if prompt.prompt_yes_no("\nDelete these secrets from AWS Secrets Manager?", default=True):
+                        for secret in secrets:
+                            print(f"{Colors.OKCYAN}  Deleting: {secret}...{Colors.ENDC}")
+                            try:
+                                del_result = subprocess.run(
+                                    ['aws', 'secretsmanager', 'delete-secret',
+                                     '--secret-id', secret,
+                                     '--region', aws_region,
+                                     '--force-delete-without-recovery'],
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=30,
+                                    env={**os.environ, 'AWS_PROFILE': self.config.aws_profile}
+                                )
+
+                                if del_result.returncode == 0:
+                                    print(f"{Colors.OKGREEN}    ✓ Deleted: {secret}{Colors.ENDC}")
+                                else:
+                                    print(f"{Colors.WARNING}    ⚠ Failed to delete: {secret}{Colors.ENDC}")
+                            except Exception as e:
+                                print(f"{Colors.WARNING}    ⚠ Error deleting {secret}: {e}{Colors.ENDC}")
+                    else:
+                        print(f"{Colors.OKCYAN}  Skipping Secrets Manager cleanup{Colors.ENDC}")
+            else:
+                print(f"{Colors.WARNING}  Could not list secrets: {result.stderr}{Colors.ENDC}")
+        except Exception as e:
+            print(f"{Colors.WARNING}  Error checking Secrets Manager: {e}{Colors.ENDC}")
+
+        return True
+
+    def run(self) -> bool:
+        """Run complete teardown sequence"""
+        print(f"\n{Colors.RED}{Colors.BOLD}")
+        print("╔" + "═" * 58 + "╗")
+        print("║" + " " * 58 + "║")
+        print("║" + "     N8N EKS DEPLOYMENT TEARDOWN".center(58) + "║")
+        print("║" + " " * 58 + "║")
+        print("║" + "  This will PERMANENTLY DELETE all resources including:".ljust(59) + "║")
+        print("║" + "  • Kubernetes applications (n8n, ingress-nginx)".ljust(59) + "║")
+        print("║" + "  • EKS cluster and node groups".ljust(59) + "║")
+        print("║" + "  • RDS PostgreSQL database (if exists)".ljust(59) + "║")
+        print("║" + "  • VPC, subnets, NAT gateways, Elastic IPs".ljust(59) + "║")
+        print("║" + "  • IAM roles and policies".ljust(59) + "║")
+        print("║" + "  • SSM parameters and Secrets Manager secrets".ljust(59) + "║")
+        print("║" + " " * 58 + "║")
+        print("║" + "  ⚠️  THIS CANNOT BE UNDONE! ⚠️".center(62) + "║")
+        print("║" + " " * 58 + "║")
+        print("╚" + "═" * 58 + "╝")
+        print(Colors.ENDC)
+
+        prompt = ConfigurationPrompt()
+        if not prompt.prompt_yes_no("\n⚠️  Are you ABSOLUTELY SURE you want to proceed with the teardown?", default=False):
+            print(f"\n{Colors.OKCYAN}Teardown cancelled{Colors.ENDC}")
+            return False
+
+        print(f"\n{Colors.RED}{Colors.BOLD}Starting teardown in 5 seconds... Press Ctrl+C to cancel{Colors.ENDC}")
+        import time
+        try:
+            for i in range(5, 0, -1):
+                print(f"{i}...")
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print(f"\n{Colors.OKCYAN}Teardown cancelled{Colors.ENDC}")
+            return False
+
+        start_time = time.time()
+
+        # Execute teardown phases
+        success = True
+        success = self.phase1_helm_releases() and success
+        success = self.phase2_kubernetes_resources() and success
+        success = self.phase3_terraform_destroy() and success
+        success = self.phase4_secrets_manager() and success
+
+        end_time = time.time()
+        duration = int(end_time - start_time)
+        minutes = duration // 60
+        seconds = duration % 60
+
+        # Summary
+        print(f"\n{Colors.HEADER}{Colors.BOLD}{'═' * 60}{Colors.ENDC}")
+        if success:
+            print(f"{Colors.OKGREEN}{Colors.BOLD}  ✅ TEARDOWN COMPLETE!{Colors.ENDC}")
+        else:
+            print(f"{Colors.WARNING}{Colors.BOLD}  ⚠️  TEARDOWN COMPLETED WITH WARNINGS{Colors.ENDC}")
+        print(f"{Colors.HEADER}{Colors.BOLD}{'═' * 60}{Colors.ENDC}")
+        print(f"\nTotal time: {minutes}m {seconds}s")
+
+        print(f"\n{Colors.BOLD}Next Steps:{Colors.ENDC}")
+        print(f"  • Verify DNS records are removed (if you created any)")
+        print(f"  • Clean local files: {Colors.OKCYAN}rm -f terraform/terraform.tfstate* terraform/tfplan terraform/terraform.tfvars{Colors.ENDC}")
+        print(f"  • Remove kubectl context: {Colors.OKCYAN}kubectl config delete-context $(kubectl config current-context){Colors.ENDC}")
+        print(f"\n{Colors.OKGREEN}To deploy again, run: {Colors.OKCYAN}python3 setup.py{Colors.ENDC}\n")
+
+        return success
+
 def main():
     """Main execution flow for N8N EKS deployment - 4 Phase Deployment"""
     # Parse command line arguments
@@ -1764,6 +2218,8 @@ def main():
                        help='Configure TLS for existing n8n deployment')
     parser.add_argument('--skip-terraform', action='store_true',
                        help='Skip Terraform infrastructure deployment and start from application deployment (assumes infrastructure already exists)')
+    parser.add_argument('--teardown', action='store_true',
+                       help='Teardown and destroy all n8n deployment resources')
     args = parser.parse_args()
 
     script_dir = Path(__file__).parent
@@ -1779,6 +2235,151 @@ def main():
         deps_ok, missing = DependencyChecker.check_all_dependencies()
         if not deps_ok:
             sys.exit(1)
+
+        # Handle teardown
+        if args.teardown:
+            config = None
+
+            # Try to load from terraform.tfvars first
+            try:
+                config = load_existing_configuration(script_dir)
+                print(f"{Colors.OKGREEN}✓ Loaded configuration from terraform.tfvars{Colors.ENDC}")
+            except Exception:
+                pass
+
+            # If not found, try to detect from terraform state
+            if not config:
+                print(f"\n{Colors.HEADER}Detecting deployment configuration...{Colors.ENDC}")
+                config = DeploymentConfig()
+
+                detected_sources = []
+
+                # Try terraform.tfvars
+                tfvars_path = script_dir / "terraform" / "terraform.tfvars"
+                if tfvars_path.exists():
+                    try:
+                        content = tfvars_path.read_text()
+                        for line in content.split('\n'):
+                            if 'aws_profile' in line and '=' in line:
+                                config.aws_profile = line.split('=')[1].strip().strip('"')
+                            elif 'region' in line and '=' in line:
+                                config.aws_region = line.split('=')[1].strip().strip('"')
+                                detected_sources.append("terraform.tfvars")
+                            elif 'n8n_namespace' in line and '=' in line:
+                                config.n8n_namespace = line.split('=')[1].strip().strip('"')
+                    except Exception:
+                        pass
+
+                # Try terraform.tfstate
+                if not config.aws_region:
+                    tfstate_path = script_dir / "terraform" / "terraform.tfstate"
+                    if tfstate_path.exists():
+                        try:
+                            result = subprocess.run(
+                                ['terraform', '-chdir=' + str(script_dir / "terraform"), 'output', '-json'],
+                                capture_output=True,
+                                text=True,
+                                timeout=30
+                            )
+                            if result.returncode == 0:
+                                outputs = json.loads(result.stdout)
+                                if 'region' in outputs:
+                                    config.aws_region = outputs['region'].get('value', '')
+                                    detected_sources.append("terraform state")
+                        except Exception:
+                            pass
+
+                # Try to get from kubectl context (if cluster is accessible)
+                if not config.aws_region:
+                    try:
+                        result = subprocess.run(
+                            ['kubectl', 'config', 'current-context'],
+                            capture_output=True,
+                            text=True,
+                            timeout=5
+                        )
+                        if result.returncode == 0 and 'eks' in result.stdout:
+                            # Extract region from EKS context (format: arn:aws:eks:REGION:...)
+                            context = result.stdout.strip()
+                            if 'eks' in context:
+                                parts = context.split(':')
+                                if len(parts) > 3:
+                                    config.aws_region = parts[3]
+                                    detected_sources.append("kubectl context")
+                    except Exception:
+                        pass
+
+                # Show what we found
+                if config.aws_region:
+                    print(f"{Colors.OKGREEN}✓ Detected region: {config.aws_region} (from {', '.join(detected_sources)}){Colors.ENDC}")
+
+                if config.aws_profile:
+                    print(f"{Colors.OKGREEN}✓ Detected AWS profile: {config.aws_profile}{Colors.ENDC}")
+
+            # Prompt for missing critical information
+            prompt = ConfigurationPrompt()
+
+            # AWS Profile - ask if not found
+            if not config.aws_profile:
+                profiles = AWSAuthChecker.get_available_profiles()
+                if profiles:
+                    print(f"\n{Colors.WARNING}AWS profile not detected{Colors.ENDC}")
+                    print(f"Available profiles: {', '.join(profiles)}")
+                    config.aws_profile = prompt.prompt(
+                        "AWS Profile to use for teardown",
+                        default=profiles[0],
+                        required=True
+                    )
+                else:
+                    print(f"\n{Colors.WARNING}No AWS profiles found, using 'default'{Colors.ENDC}")
+                    config.aws_profile = "default"
+
+            # AWS Region - MUST ask if not found (critical!)
+            if not config.aws_region:
+                print(f"\n{Colors.WARNING}⚠️  AWS Region not detected from local configuration{Colors.ENDC}")
+                common_regions = [
+                    "us-east-1", "us-east-2", "us-west-1", "us-west-2",
+                    "eu-west-1", "eu-central-1", "ap-southeast-1", "ap-southeast-2"
+                ]
+                print(f"Common regions: {', '.join(common_regions)}")
+                config.aws_region = prompt.prompt(
+                    "AWS Region where resources are deployed",
+                    default="us-east-1",
+                    required=True
+                )
+
+            # Namespace - default is fine
+            if not config.n8n_namespace:
+                config.n8n_namespace = "n8n"
+
+            # Verify AWS credentials
+            print(f"\n{Colors.HEADER}🔐 Verifying AWS credentials...{Colors.ENDC}")
+            success, message = AWSAuthChecker.verify_credentials(
+                config.aws_profile,
+                config.aws_region
+            )
+
+            if success:
+                print(f"{Colors.OKGREEN}✓ AWS credentials verified{Colors.ENDC}")
+                print(f"  {message}")
+            else:
+                print(f"{Colors.FAIL}✗ AWS authentication failed{Colors.ENDC}")
+                print(f"  {message}")
+                print(f"\n{Colors.WARNING}Please verify your AWS credentials and region are correct{Colors.ENDC}")
+                if not prompt.prompt_yes_no("Continue with teardown anyway?", default=False):
+                    sys.exit(1)
+
+            # Show final configuration summary
+            print(f"\n{Colors.HEADER}{Colors.BOLD}Teardown Configuration{Colors.ENDC}")
+            print("=" * 60)
+            print(f"AWS Profile:     {Colors.OKCYAN}{config.aws_profile}{Colors.ENDC}")
+            print(f"AWS Region:      {Colors.OKCYAN}{config.aws_region}{Colors.ENDC}")
+            print(f"Namespace:       {Colors.OKCYAN}{config.n8n_namespace}{Colors.ENDC}")
+            print("=" * 60)
+
+            teardown = TeardownRunner(script_dir, config)
+            success = teardown.run()
+            sys.exit(0 if success else 1)
 
         if args.configure_tls:
             try:

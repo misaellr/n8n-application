@@ -1,6 +1,120 @@
 # N8N EKS Deployment - Changelog
 
-## Latest Changes (2025-10-14)
+## Version 1.6.0 (2025-10-14)
+
+### New Features
+
+#### 1. TLS/SSL Certificate Configuration
+**Feature**: Fully automated TLS/SSL certificate provisioning with Let's Encrypt integration.
+
+**Implementation**:
+- Integrated cert-manager for automated certificate management
+- Let's Encrypt ClusterIssuer configuration for production certificates
+- Automatic certificate issuance and renewal
+- Certificate monitoring and validation commands
+
+**Components**:
+- Certificate Manager deployment with CRDs
+- ClusterIssuer resource for Let's Encrypt production
+- TLS ingress configuration with automatic certificate reference
+- Certificate validity monitoring (3-month renewal cycle)
+
+**Files Modified**:
+- `helm/values.yaml:12-13` - Updated domain from n8n.example.com to n8n-aws.lrproducthub.com
+- `helm/values.yaml:52-60` - Updated N8N_HOST, WEBHOOK_URL, and protocol configuration
+- `setup.py` - TLS configuration workflow in Phase 4
+
+**Verification Commands**:
+```bash
+kubectl get certificate -n n8n
+kubectl describe certificate n8n-tls -n n8n
+```
+
+**Certificate Details**:
+- Issuer: Let's Encrypt (R13)
+- Validity: 90 days (auto-renewal at 30 days)
+- Domain: n8n-aws.lrproducthub.com
+- Protocol: TLS 1.2, TLS 1.3
+
+---
+
+#### 2. Infrastructure Teardown Functionality
+**Feature**: Complete automated teardown of all deployment resources with `--teardown` flag.
+
+**Implementation**: Added comprehensive TeardownRunner class with 4-phase destruction workflow:
+
+**Phase 1: Helm Releases**
+- Uninstall n8n application
+- Remove ingress-nginx controller (waits for LoadBalancer deletion)
+- Remove cert-manager (if exists)
+
+**Phase 2: Kubernetes Resources**
+- Delete PersistentVolumeClaims
+- Clean up manual secrets (basic-auth, tls, db-credentials)
+- Remove namespaces (n8n, ingress-nginx, cert-manager)
+
+**Phase 3: Terraform Infrastructure**
+- Detect and disable RDS deletion protection automatically
+- Destroy EKS cluster, VPC, and all AWS resources
+- Clean up security groups, IAM roles, and policies
+
+**Phase 4: Secrets Manager Cleanup**
+- Identify n8n-related secrets in AWS Secrets Manager
+- Optional deletion with user confirmation
+- Force delete without recovery period
+
+**Safety Features**:
+- Double confirmation required before proceeding
+- 5-second countdown before execution
+- Automatic detection of AWS region and profile from existing config
+- Graceful handling of missing resources
+- Comprehensive progress reporting
+
+**Usage**:
+```bash
+python3 setup.py --teardown
+```
+
+**Files Modified**:
+- `setup.py:1759-2158` - Added TeardownRunner class with complete teardown logic
+- `setup.py:2221` - Added --teardown argument parser
+- `setup.py:2239-2381` - Teardown execution flow with config detection
+
+**Estimated Duration**: 10-20 minutes (depending on resource count)
+
+---
+
+#### 3. Multi-Region Support Enhancement
+**Feature**: Improved support for AWS region selection with us-west-1 configuration.
+
+**Changes**:
+- Updated default region from us-east-1 to us-west-1
+- Region-aware RDS and EKS deployment
+- Automatic region detection for teardown operations
+
+**Files Modified**:
+- `terraform/variables.tf:9` - Updated default region to us-west-1
+
+---
+
+#### 4. Production Domain Configuration
+**Feature**: Configured production domain for n8n deployment.
+
+**Changes**:
+- Domain: n8n-aws.lrproducthub.com
+- HTTPS protocol with Let's Encrypt certificate
+- Webhook URL configuration for external integrations
+- CNAME record pointing to ELB in us-west-1
+
+**Files Modified**:
+- `helm/values.yaml:15` - ingress.host
+- `helm/values.yaml:52` - N8N_HOST environment variable
+- `helm/values.yaml:58` - WEBHOOK_URL configuration
+- `terraform/variables.tf:94` - n8n_host default value
+
+---
+
+## Previous Changes (2025-10-14)
 
 ### Critical Fixes
 
@@ -408,6 +522,7 @@ python3 setup.py
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.6.0 | 2025-10-14 | TLS/SSL cert automation, teardown functionality, multi-region support |
 | 1.5.0 | 2025-10-14 | Fixed PostgreSQL connection failures (security groups + SSL) |
 | 1.4.0 | 2025-10-14 | Fixed namespace creation race condition |
 | 1.3.0 | 2025-10-14 | Added basic auth state tracking, cert-manager idempotency |

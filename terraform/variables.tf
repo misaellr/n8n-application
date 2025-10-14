@@ -6,7 +6,7 @@ variable "aws_profile" {
 variable "region" {
   description = "AWS region"
   type        = string
-  default     = "us-east-1"
+  default     = "us-west-1"
 }
 
 variable "project_tag" {
@@ -91,7 +91,7 @@ variable "n8n_service_port" {
 variable "n8n_host" {
   description = "Primary hostname for n8n ingress and application URLs"
   type        = string
-  default     = "n8n.example.com"
+  default     = "n8n-aws.lrproducthub.com"
 }
 
 variable "n8n_protocol" {
