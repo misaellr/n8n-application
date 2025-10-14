@@ -12,7 +12,7 @@ service:
 ingress:
   enabled: true
   className: nginx
-  host: n8n.example.com
+  host: "n8n-aws.lrproducthub.com"
   annotations:
     nginx.ingress.kubernetes.io/proxy-body-size: "20m"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
@@ -49,13 +49,13 @@ persistence:
 # Note: When deployed via Terraform, many of these values are overridden
 # based on terraform.tfvars configuration (host, protocol, timezone, etc.)
 env:
-  N8N_HOST: "n8n.example.com"
+  N8N_HOST: "n8n-aws.lrproducthub.com"
   N8N_PROTOCOL: "https"  # Set to "http" when tls.enabled=false
   N8N_PORT: "5678"
   N8N_RUNNERS_ENABLED: "true"
   GENERIC_TIMEZONE: "America/Bahia"
   TZ: "America/Bahia"
-  WEBHOOK_URL: "https://n8n.example.com/"
+  WEBHOOK_URL: "https://n8n-aws.lrproducthub.com/"
   N8N_PROXY_HOPS: "1"
 
 # Sensitive environment variables (templated into a Kubernetes Secret)
