@@ -1,8 +1,8 @@
 # N8N AWS Deployment Automation - Requirements Document
 
-**Version**: 1.0
-**Date**: 2025-10-05
-**Status**: Draft
+**Version**: 1.2
+**Date**: 2025-10-09
+**Status**: Updated
 
 ---
 
@@ -523,16 +523,16 @@ The tool must support updating TLS configuration after deployment:
 - If PostgreSQL selected:
   - Provision RDS PostgreSQL instance
   - Prompt for RDS configuration:
-    - Instance class (db.t3.micro, db.t3.small, db.t3.medium)
+    - Instance class (db.t3.micro, db.t3.small, db.t3.medium) [default: db.t3.micro]
     - Storage size (default: 20GB)
-    - Multi-AZ deployment (yes/no)
+    - Multi-AZ deployment (yes/no) [default: no]
   - Configure n8n with PostgreSQL connection
   - Store DB credentials in AWS Secrets Manager
 
 **RDS Provisioning (when PostgreSQL selected):**
 - Create RDS subnet group in private subnets
 - Create RDS security group (allow access from EKS nodes only)
-- Provision RDS PostgreSQL instance (version 15+)
+- Provision RDS PostgreSQL instance (version 15.14+)
 - Generate random database password
 - Store credentials in AWS Secrets Manager (`/n8n/db-credentials`)
 - Configure n8n Helm chart with PostgreSQL environment variables:
@@ -574,7 +574,7 @@ The tool must support updating TLS configuration after deployment:
 
 **Must Create:**
 - VPC with public/private subnets across 3 AZs
-- NAT Gateways for private subnet internet access
+- NAT Gateway (1 shared across all AZs) for private subnet internet access
 - Internet Gateway for public subnet access
 - Route tables for public and private subnets
 - EKS cluster (version 1.31)
@@ -583,9 +583,11 @@ The tool must support updating TLS configuration after deployment:
 - Default StorageClass for EBS volumes (gp3)
 - IAM roles for cluster and nodes (IRSA for EBS CSI)
 - SSM Parameter for encryption key (SecureString)
-- NGINX Ingress Controller with Network Load Balancer
-- Static Elastic IP for NLB (for consistent DNS mapping)
 - n8n Helm release with proper configuration
+
+**Conditionally Create (based on configuration):**
+- NGINX Ingress Controller with Network Load Balancer - if `enable_nginx_ingress` is true
+- Static Elastic IPs for NLB (one per AZ) - if NGINX ingress enabled
 
 **Conditionally Create (based on user configuration):**
 
@@ -601,7 +603,7 @@ The tool must support updating TLS configuration after deployment:
 - AWS Secrets Manager secret for credentials backup - if basic auth enabled
 
 *Database Configuration:*
-- RDS PostgreSQL instance - if PostgreSQL selected (instead of SQLite)
+- RDS PostgreSQL instance (version 15.14+) - if PostgreSQL selected (instead of SQLite)
 - RDS subnet group in private subnets - if PostgreSQL selected
 - RDS security group - if PostgreSQL selected
 - AWS Secrets Manager secret for DB credentials - if PostgreSQL selected
@@ -926,8 +928,9 @@ The tool must support updating TLS configuration after deployment:
 │  │  │  └────────────┘  │          │  │                │ │   │ │
 │  │  │                  │          │  │  ┌──────────┐  │ │   │ │
 │  │  │  ┌────────────┐  │          │  │  │ n8n Pod  │  │ │   │ │
-│  │  │  │ NAT GW x3  │──┼─────────►│  │  └──────────┘  │ │   │ │
-│  │  │  └────────────┘  │          │  │                │ │   │ │
+│  │  │  │ NAT GW     │──┼─────────►│  │  └──────────┘  │ │   │ │
+│  │  │  │ (1 shared) │  │          │  │                │ │   │ │
+│  │  │  └────────────┘  │          │  │  ┌──────────┐  │ │   │ │
 │  │  │                  │          │  │  ┌──────────┐  │ │   │ │
 │  │  │  ┌────────────┐  │          │  │  │ EBS PVC  │  │ │   │ │
 │  │  │  │ IGW        │  │          │  │  │ (10Gi)   │  │ │   │ │
@@ -945,7 +948,7 @@ The tool must support updating TLS configuration after deployment:
 │  ┌────────────────────────────────────────────────────────────┐ │
 │  │  EKS Add-ons                                               │ │
 │  │  - EBS CSI Driver (for persistent storage)                │ │
-│  │  - NGINX Ingress Controller                               │ │
+│  │  - NGINX Ingress Controller (optional, configurable)      │ │
 │  └────────────────────────────────────────────────────────────┘ │
 │                                                                   │
 │  ┌────────────────────────────────────────────────────────────┐ │
@@ -957,9 +960,9 @@ The tool must support updating TLS configuration after deployment:
 │                                                                   │
 │  ┌────────────────────────────────────────────────────────────┐ │
 │  │  RDS PostgreSQL (Optional - if selected instead of SQLite)│ │
-│  │  - PostgreSQL 15+ in private subnets                       │ │
-│  │  - Multi-AZ option available                               │ │
-│  │  - db.t3.micro or db.t3.small instance                     │ │
+│  │  - PostgreSQL 15.14+ in private subnets                    │ │
+│  │  - Single-AZ by default (Multi-AZ option available)        │ │
+│  │  - db.t3.micro (default), db.t3.small, or db.t3.medium    │ │
 │  └────────────────────────────────────────────────────────────┘ │
 │                                                                   │
 │  ┌────────────────────────────────────────────────────────────┐ │
@@ -974,23 +977,25 @@ The tool must support updating TLS configuration after deployment:
 **Cost Breakdown (SQLite):**
 - EKS control plane: ~$73/month
 - EC2 nodes (2x t3.medium): ~$60/month
-- NAT Gateways (3x): ~$97/month
-- NLB (for ingress): ~$16/month
+- NAT Gateway (1 shared): ~$32/month
+- NLB (optional, for ingress): ~$16/month (if NGINX ingress enabled)
 - EBS volumes (10Gi): ~$1/month
 - Data transfer: Variable (~$5-10/month)
-- **Total: ~$252-262/month**
+- **Total: ~$171-181/month (without NLB) or ~$187-197/month (with NLB)**
 
 **Cost Breakdown (PostgreSQL/RDS):**
-- Base EKS costs: ~$247-257/month (same as above)
-- RDS db.t3.micro (single-AZ): ~$15/month
+- Base EKS costs: ~$171-197/month (same as above, depending on NLB)
+- RDS db.t3.micro (single-AZ): ~$15/month [default]
 - RDS db.t3.micro (multi-AZ): ~$30/month
 - RDS db.t3.small (single-AZ): ~$30/month
 - RDS db.t3.small (multi-AZ): ~$60/month
 - RDS storage (20GB): ~$2.30/month
-- **Total: ~$264-319/month (depending on RDS configuration)**
+- **Total: ~$188-259/month (depending on RDS and NLB configuration)**
 
-**Cost optimization options:**
-- Use 1 NAT Gateway instead of 3 (saves ~$65/month, reduces HA)
+**Cost optimization options (already applied by default):**
+- ✓ Use 1 NAT Gateway shared across AZs (saves ~$65/month vs 3 NAT gateways)
+- ✓ Disable NGINX ingress by default (saves ~$16/month, use LoadBalancer or NodePort instead)
+- ✓ Use single-AZ RDS by default (saves ~$15/month vs multi-AZ for db.t3.micro)
 - Use smaller nodes like t3.small (saves ~$30/month, reduces capacity)
 - Reduce min/desired node count to 1 (saves ~$30/month, reduces HA)
 - Use SQLite instead of PostgreSQL (saves ~$15-60/month, reduces scalability)
@@ -1229,7 +1234,7 @@ The tool must support updating TLS configuration after deployment:
 │  • NGINX Ingress Controller                               │
 │  • N8N deployed via Helm                                   │
 │                                                            │
-│  Estimated cost: ~$250-260/month                          │
+│  Estimated cost: ~$170-200/month (optimized for cost)                          │
 │  Deployment time: ~25-30 minutes                          │
 │                                                            │
 └────────────────────────────────────────────────────────────┘
@@ -1465,16 +1470,16 @@ TLS Configuration:
   Certificate:      Let's Encrypt (auto-generated)
   Email:            admin@production.example.com
 
-Estimated Monthly Cost: $252-262
+Estimated Monthly Cost: $170-200 (optimized)
 
 Resources to be created:
   ✓ VPC with public/private subnets (3 AZs)
-  ✓ NAT Gateways (3x) and Internet Gateway
+  ✓ NAT Gateway (1 shared) and Internet Gateway
   ✓ EKS cluster (Kubernetes 1.31)
   ✓ Node group (2x t3.medium in private subnets)
   ✓ EBS CSI driver addon
   ✓ Default StorageClass (gp3, encrypted)
-  ✓ NGINX Ingress Controller with NLB + Elastic IP
+  ✓ NGINX Ingress Controller with NLB + Elastic IPs (optional, configurable)
   ✓ IAM roles (cluster, nodes, IRSA for EBS)
   ✓ SSM parameter (encryption key, SecureString)
   ✓ cert-manager (for Let's Encrypt)
@@ -1936,7 +1941,8 @@ Example IAM policy: (for production, tighten further)
 |---------|------|--------|---------|
 | 1.0 | 2025-10-05 | System | Initial requirements document |
 | 1.1 | 2025-10-05 | System | Added FR-8 (Basic Authentication), FR-9 (Database Selection - SQLite vs PostgreSQL), updated Phase 4 to include basic auth configuration, added RDS provisioning requirements, updated cost estimates, updated acceptance criteria |
+| 1.2 | 2025-10-09 | System | **Cost Optimizations Applied**: Reduced NAT Gateways from 3 to 1 shared (saves ~$65/month), disabled NGINX ingress by default (saves ~$16/month), changed RDS to single-AZ by default (saves ~$15/month), updated PostgreSQL version to 15.14, updated all cost estimates to reflect optimizations (~$170-200/month vs ~$250-260/month) |
 
 ---
 
-**Document Status**: Draft - Awaiting Review
+**Document Status**: Updated - Reflects deployed architecture

@@ -24,7 +24,7 @@ variable "cluster_name" {
 variable "cluster_version" {
   description = "Kubernetes version for EKS cluster"
   type        = string
-  default     = "1.29"
+  default     = "1.31"
 }
 
 variable "node_instance_types" {
@@ -67,7 +67,7 @@ variable "n8n_encryption_key" {
 variable "enable_nginx_ingress" {
   description = "Whether to install nginx ingress controller via Helm"
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "n8n_namespace" {
