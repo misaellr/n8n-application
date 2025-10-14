@@ -165,19 +165,82 @@ Once certificate shows `READY=True`, access n8n at `https://your-domain.com`
 
 ## 8. Cleanup
 
-Destroy the environment when finished:
+### Automated Teardown (Recommended)
+
+Destroy the entire environment with one command:
+
 ```bash
+python3 setup.py --teardown
+```
+
+**What it does**:
+- **Phase 1**: Uninstalls Helm releases (n8n, ingress-nginx, cert-manager)
+- **Phase 2**: Deletes Kubernetes resources (PVCs, secrets, namespaces)
+- **Phase 3**: Destroys Terraform infrastructure (EKS, VPC, RDS, etc.)
+- **Phase 4**: Cleans up AWS Secrets Manager entries (with confirmation)
+
+**Features**:
+- Automatically detects AWS region and profile from existing configuration
+- Disables RDS deletion protection automatically
+- Double confirmation with 5-second countdown
+- Graceful handling of missing resources
+- **Duration**: ~10-20 minutes
+
+### Manual Cleanup
+
+If you prefer manual cleanup:
+
+```bash
+# Step 1: Uninstall Helm releases
+helm uninstall n8n -n n8n
+helm uninstall cert-manager -n cert-manager  # if installed
+
+# Step 2: Delete namespaces
+kubectl delete namespace n8n cert-manager ingress-nginx
+
+# Step 3: Destroy Terraform infrastructure
 (cd terraform && terraform destroy)
 ```
 
-**Note**: Terraform will **not** destroy Helm-deployed resources automatically. Clean up manually:
+**Important**: Remove any DNS entries created for the deployment.
+
+---
+
+## 9. Redeploying Application Only
+
+If your infrastructure is already running and you only want to update the n8n application:
+
 ```bash
-helm uninstall n8n -n n8n
-helm uninstall cert-manager -n cert-manager  # if installed
-kubectl delete namespace n8n cert-manager
+python3 setup.py --skip-terraform
 ```
 
-Remove any DNS entries created for the deployment.
+**What it does**:
+- Loads existing configuration from `terraform.tfvars`
+- Verifies infrastructure exists (checks `terraform.tfstate`)
+- Configures kubectl automatically
+- Skips Phase 1 (Terraform) and starts from Phase 2 (Helm deployment)
+- Continues with Phase 3 (LoadBalancer) and Phase 4 (TLS/Basic Auth) if needed
+
+**Use cases**:
+- Update n8n image version
+- Modify Helm chart values
+- Change resource limits or replica count
+- Recover from failed application deployment
+- Test configuration changes without infrastructure changes
+
+**Requirements**:
+- Infrastructure must already be deployed
+- `terraform/terraform.tfstate` must exist
+- AWS credentials must be configured
+
+**Example workflow**:
+```bash
+# Make changes to helm/values.yaml
+vim helm/values.yaml
+
+# Redeploy application with new configuration
+python3 setup.py --skip-terraform
+```
 
 ---
 

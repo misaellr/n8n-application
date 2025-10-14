@@ -143,15 +143,17 @@ You can safely interrupt the setup at any time:
 Check deployment status:
 
 ```bash
-kubectl get pods -n default
-kubectl get ingress -n default
-kubectl get svc -n default
+kubectl get pods -n n8n
+kubectl get ingress -n n8n
+kubectl get svc -n ingress-nginx
 ```
 
 View logs:
 ```bash
-kubectl logs -f deployment/n8n -n default
+kubectl logs -f deployment/n8n -n n8n
 ```
+
+**Note**: Replace `-n n8n` with your configured namespace if different.
 
 ## Manual Deployment (Without Setup Script)
 
@@ -269,9 +271,39 @@ kubectl logs <pod-name> -n default
 
 ## Cleanup
 
+### Automated Teardown (Recommended)
+
+```bash
+python3 setup.py --teardown
+```
+
+This automated teardown will:
+- Uninstall all Helm releases (n8n, ingress-nginx, cert-manager)
+- Delete Kubernetes resources (PVCs, secrets, namespaces)
+- Destroy Terraform infrastructure (EKS, VPC, RDS, etc.)
+- Clean up AWS Secrets Manager entries (with confirmation)
+- Automatically detect and disable RDS deletion protection
+
+**Total time**: ~10-20 minutes
+
+**Safety features**:
+- Double confirmation required
+- 5-second countdown before execution
+- Graceful handling of missing resources
+
+### Manual Cleanup
+
 ```bash
 cd terraform
 terraform destroy
+```
+
+**Note**: Manual cleanup requires additional steps to remove Helm releases first:
+
+```bash
+helm uninstall n8n -n n8n
+helm uninstall cert-manager -n cert-manager  # if installed
+kubectl delete namespace n8n cert-manager ingress-nginx
 ```
 
 This will remove all resources:
@@ -280,7 +312,7 @@ This will remove all resources:
 - Network Load Balancer
 - IAM roles and policies
 - SSM parameters
-- N8N Helm release
+- RDS instance (if created)
 - PersistentVolumeClaims and EBS volumes
 
 ## Cost Estimation
@@ -301,6 +333,27 @@ This will remove all resources:
 - Reduce node count to 1 (saves ~$30/month, reduces HA)
 
 ## Advanced Configuration
+
+### Redeploying Application Only
+
+If infrastructure is already deployed and you want to update just the n8n application (without redeploying EKS, VPC, etc.):
+
+```bash
+python3 setup.py --skip-terraform
+```
+
+This skips Phase 1 (Terraform infrastructure) and starts directly from Phase 2 (Helm deployment).
+
+**Use cases**:
+- Redeploying n8n after infrastructure is already up
+- Testing Helm chart changes without rerunning Terraform
+- Recovering from failed application deployments
+- Updating n8n configuration without touching infrastructure
+
+**Requirements**:
+- Infrastructure must already be deployed (terraform.tfstate must exist)
+- Existing terraform.tfvars will be loaded automatically
+- kubectl context will be configured automatically
 
 ### Using PostgreSQL
 
