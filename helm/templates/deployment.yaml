@@ -63,6 +63,10 @@ spec:
                 secretKeyRef:
                   name: n8n-db-credentials
                   key: password
+            - name: DB_POSTGRESDB_SSL_ENABLED
+              value: "true"
+            - name: DB_POSTGRESDB_SSL_REJECT_UNAUTHORIZED
+              value: "false"
 {{- end }}
           volumeMounts:
             - name: n8n-data

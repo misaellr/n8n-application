@@ -599,12 +599,23 @@ resource "aws_security_group" "rds" {
   description = "Security group for RDS PostgreSQL"
   vpc_id      = aws_vpc.main.id
 
+  # Allow connections from custom EKS nodes security group
   ingress {
-    description     = "PostgreSQL from EKS worker nodes"
+    description     = "PostgreSQL from EKS worker nodes (custom SG)"
     from_port       = 5432
     to_port         = 5432
     protocol        = "tcp"
     security_groups = [aws_security_group.eks_nodes.id]
+  }
+
+  # Allow connections from EKS cluster security group
+  # (EKS may use cluster SG for nodes by default)
+  ingress {
+    description     = "PostgreSQL from EKS cluster security group"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_eks_cluster.main.vpc_config[0].cluster_security_group_id]
   }
 
   egress {

@@ -4,7 +4,77 @@
 
 ### Critical Fixes
 
-#### 1. Namespace Creation Race Condition (FIXED)
+#### 1. PostgreSQL Connection Failures (503 Service Unavailable) (FIXED)
+**Issue**: After successful Helm deployment, n8n pods entered CrashLoopBackOff state with errors:
+- Database connection timeout: "Could not establish database connection within 20,000 ms"
+- SSL/TLS error: "no pg_hba.conf entry for host, no encryption"
+
+**Root Causes**:
+1. **Security Group Mismatch**: RDS security group only allowed connections from the custom `eks_nodes` security group, but EKS was assigning the cluster's default security group to worker nodes instead.
+2. **Missing SSL Configuration**: n8n was attempting unencrypted connections to RDS PostgreSQL, which requires SSL by default on AWS.
+
+**Solution**:
+
+**A. Security Group Fix** (`terraform/main.tf:596-633`):
+Updated RDS security group to accept connections from BOTH security groups:
+```hcl
+resource "aws_security_group" "rds" {
+  # Allow connections from custom EKS nodes security group
+  ingress {
+    description     = "PostgreSQL from EKS worker nodes (custom SG)"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.eks_nodes.id]
+  }
+
+  # Allow connections from EKS cluster security group
+  ingress {
+    description     = "PostgreSQL from EKS cluster security group"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_eks_cluster.main.vpc_config[0].cluster_security_group_id]
+  }
+}
+```
+
+**B. SSL Configuration Fix** (`setup.py:1143-1153`):
+Added PostgreSQL SSL environment variables to Helm deployment:
+```python
+values_args.extend([
+    '--set', 'database.type=postgresql',
+    '--set', f'database.postgresql.host={db_config.get("rds_address", "")}',
+    '--set', f'database.postgresql.port=5432',
+    '--set', f'database.postgresql.database={db_config.get("rds_database_name", "n8n")}',
+    '--set', f'database.postgresql.user={db_config.get("rds_username", "")}',
+    # Enable SSL for RDS connections (required by AWS RDS)
+    '--set', 'env.DB_POSTGRESDB_SSL_ENABLED=true',
+    '--set', 'env.DB_POSTGRESDB_SSL_REJECT_UNAUTHORIZED=false',
+])
+```
+
+**C. Deployment Template Update** (`helm/templates/deployment.yaml:66-69`):
+Added default SSL environment variables to deployment template:
+```yaml
+- name: DB_POSTGRESDB_SSL_ENABLED
+  value: "true"
+- name: DB_POSTGRESDB_SSL_REJECT_UNAUTHORIZED
+  value: "false"
+```
+
+**Files Modified**:
+- `terraform/main.tf` - RDS security group dual-source configuration
+- `setup.py` - Helm deployment with SSL environment variables
+- `helm/templates/deployment.yaml` - Default PostgreSQL SSL configuration
+
+**Impact**: Resolves 503 Service Unavailable errors and CrashLoopBackOff states when using PostgreSQL database
+
+**Testing**: Verified by manually adding security group rule and SSL configuration, resulting in successful pod startup and healthy status
+
+---
+
+#### 2. Namespace Creation Race Condition (FIXED)
 **Issue**: Deployment failed with error `namespaces "n8n" not found` when trying to create database credentials secret.
 
 **Root Cause**: The setup.py script attempted to create Kubernetes secrets in the `n8n` namespace before the namespace was created. While Helm's `--create-namespace` flag was used, the secret creation happened in the Python code before the Helm command executed.
@@ -338,6 +408,7 @@ python3 setup.py
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.5.0 | 2025-10-14 | Fixed PostgreSQL connection failures (security groups + SSL) |
 | 1.4.0 | 2025-10-14 | Fixed namespace creation race condition |
 | 1.3.0 | 2025-10-14 | Added basic auth state tracking, cert-manager idempotency |
 | 1.2.0 | 2025-10-13 | Implemented 4-phase deployment workflow |
