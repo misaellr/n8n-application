@@ -62,6 +62,8 @@ locals {
   azs         = slice(data.aws_availability_zones.available.names, 0, min(3, length(data.aws_availability_zones.available.names)))
   # Use only 1 NAT gateway (in first AZ) to save on EIP usage
   nat_gateway_count = 1
+  # Use only 2 NLB EIPs (due to EIP limit) even though we have 3 AZs
+  nlb_eip_count = 2
 }
 
 # Generate encryption key if not provided
@@ -234,6 +236,7 @@ resource "aws_iam_role" "eks_cluster" {
   assume_role_policy = data.aws_iam_policy_document.eks_assume_role.json
 
   tags = {
+    Name    = "${local.project_tag}-eks-cluster-role"
     Project = local.project_tag
   }
 }
@@ -347,6 +350,7 @@ resource "aws_iam_role" "eks_nodes" {
   assume_role_policy = data.aws_iam_policy_document.node_assume_role.json
 
   tags = {
+    Name    = "${local.project_tag}-eks-node-role"
     Project = local.project_tag
   }
 }
@@ -406,6 +410,12 @@ resource "aws_eks_node_group" "main" {
     max_unavailable = 1
   }
 
+  # These labels are applied to Kubernetes nodes
+  labels = {
+    role        = "worker"
+    environment = "production"
+  }
+
   depends_on = [
     aws_iam_role_policy_attachment.node_worker_policy,
     aws_iam_role_policy_attachment.node_cni_policy,
@@ -414,9 +424,13 @@ resource "aws_eks_node_group" "main" {
     aws_security_group.eks_nodes,
   ]
 
+  # Tags for the node group resource and EC2 instances
   tags = {
-    Name    = "${local.project_tag}-node-group"
-    Project = local.project_tag
+    Name        = "${local.project_tag}-eks-worker-node"
+    Description = "EKS worker node for ${local.project_tag} cluster"
+    Project     = local.project_tag
+    NodeGroup   = "${local.project_tag}-node-group"
+    ManagedBy   = "EKS"
   }
 }
 
@@ -449,6 +463,7 @@ resource "aws_iam_role" "ebs_csi_driver" {
   assume_role_policy = data.aws_iam_policy_document.ebs_csi_assume_role.json
 
   tags = {
+    Name    = "${local.project_tag}-ebs-csi-driver-role"
     Project = local.project_tag
   }
 }
@@ -469,6 +484,7 @@ resource "aws_iam_openid_connect_provider" "eks" {
   url             = aws_eks_cluster.main.identity[0].oidc[0].issuer
 
   tags = {
+    Name    = "${local.project_tag}-eks-oidc-provider"
     Project = local.project_tag
   }
 }
@@ -485,6 +501,7 @@ resource "aws_eks_addon" "ebs_csi" {
   ]
 
   tags = {
+    Name    = "${local.project_tag}-ebs-csi-driver"
     Project = local.project_tag
   }
 }
@@ -515,11 +532,13 @@ resource "kubernetes_storage_class" "ebs_gp3" {
 # SSM Parameter for n8n encryption key
 ########################################
 resource "aws_ssm_parameter" "n8n_encryption_key" {
-  name  = "/n8n/encryption_key"
-  type  = "SecureString"
-  value = local.enc_key
+  name        = "/n8n/encryption_key"
+  description = "n8n encryption key for secure credential storage"
+  type        = "SecureString"
+  value       = local.enc_key
 
   tags = {
+    Name    = "${local.project_tag}-n8n-encryption-key"
     Project = local.project_tag
   }
 }
@@ -535,7 +554,7 @@ data "aws_ssm_parameter" "n8n_encryption_key" {
 # Elastic IPs for NLB (Static IP addresses)
 ########################################
 resource "aws_eip" "nlb" {
-  count  = var.enable_nginx_ingress ? length(local.azs) : 0
+  count  = var.enable_nginx_ingress ? local.nlb_eip_count : 0
   domain = "vpc"
 
   tags = {
@@ -560,8 +579,8 @@ resource "helm_release" "nginx_ingress" {
 
   values = [
     templatefile("${path.module}/nginx-ingress-values.tpl", {
-      nlb_eips    = join(",", aws_eip.nlb[*].id)
-      nlb_subnets = join(",", aws_subnet.public[*].id)
+      nlb_eips    = join(",", slice(aws_eip.nlb[*].id, 0, local.nlb_eip_count))
+      nlb_subnets = join(",", slice(aws_subnet.public[*].id, 0, local.nlb_eip_count))
     })
   ]
 
@@ -669,6 +688,7 @@ resource "aws_secretsmanager_secret" "db_credentials" {
   recovery_window_in_days = 0  # Force immediate deletion on destroy
 
   tags = {
+    Name    = "${local.project_tag}-db-credentials"
     Project = local.project_tag
   }
 }
@@ -695,6 +715,7 @@ resource "aws_secretsmanager_secret" "basic_auth" {
   recovery_window_in_days = 0  # Force immediate deletion on destroy
 
   tags = {
+    Name    = "${local.project_tag}-basic-auth-credentials"
     Project = local.project_tag
   }
 }

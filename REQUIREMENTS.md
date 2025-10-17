@@ -1,7 +1,7 @@
 # N8N AWS Deployment Automation - Requirements Document
 
-**Version**: 1.2
-**Date**: 2025-10-09
+**Version**: 1.3
+**Date**: 2025-10-15
 **Status**: Updated
 
 ---
@@ -609,7 +609,13 @@ The tool must support updating TLS configuration after deployment:
 - AWS Secrets Manager secret for DB credentials - if PostgreSQL selected
 
 **Acceptance Criteria**:
-- All resources tagged appropriately
+- All resources tagged appropriately with Name and Project tags
+- EC2 instances (EKS nodes) have descriptive tags (Name, Description, NodeGroup, ManagedBy)
+- IAM roles have Name tags for easy identification
+- SSM parameters include descriptions and Name tags
+- Secrets Manager secrets include Name tags
+- EKS addons include Name tags
+- All resources easily identifiable in AWS console
 - Infrastructure follows AWS best practices
 - Private subnets used for compute workloads (nodes)
 - Encryption enabled where applicable (EBS, SSM, RDS)
@@ -738,7 +744,41 @@ The tool must support updating TLS configuration after deployment:
 
 ### 5.3 Security Requirements
 
-#### FR-16: Security Best Practices
+#### FR-16: Resource Naming and Tagging
+
+**Priority**: MUST HAVE
+**User Story**: As a user, I want all AWS resources properly named and tagged so I can easily identify and manage them in the AWS console.
+
+**Requirements**:
+- All resources must have a `Name` tag with descriptive identifier
+- All resources must have a `Project` tag for resource grouping
+- EC2 instances (EKS nodes) must have additional metadata tags:
+  - `Description`: Brief description of resource purpose
+  - `NodeGroup`: Reference to EKS node group
+  - `ManagedBy`: "EKS" to indicate managed resource
+- IAM roles must have `Name` tags matching their resource names
+- SSM parameters must include:
+  - `description` field explaining parameter purpose
+  - `Name` tag for console visibility
+- Secrets Manager secrets must have descriptive `Name` tags
+- EKS addons must have `Name` tags
+- Security groups must have both `name` and `description` fields
+- All tags follow consistent naming convention: `{project_tag}-{resource-type}-{identifier}`
+
+**Acceptance Criteria**:
+- All AWS resources have `Name` and `Project` tags
+- EC2 instances easily identifiable in EC2 console
+- IAM roles easily identifiable in IAM console
+- SSM parameters include descriptions and are easily searchable
+- Secrets Manager secrets easily identifiable
+- No resources appear as "unnamed" or with generic IDs only
+- Tag values use project-specific prefix for filtering
+- Resources can be filtered by project tag for cost tracking
+- All resource names are human-readable and descriptive
+
+---
+
+#### FR-17: Security Best Practices
 
 **Priority**: MUST HAVE
 **User Story**: As a user, I want my deployment to follow security best practices without extra effort.
@@ -1715,6 +1755,18 @@ A feature is considered "done" when:
 - [ ] Persistent data survives pod restart
 - [ ] Encryption key stored in SSM
 
+**Resource Naming & Tagging:**
+- [ ] All EC2 instances have Name tags
+- [ ] EC2 instances have Description, NodeGroup, ManagedBy tags
+- [ ] All IAM roles have Name tags
+- [ ] SSM parameters have descriptions and Name tags
+- [ ] Secrets Manager secrets have Name tags
+- [ ] EKS addons have Name tags
+- [ ] All resources have Project tags
+- [ ] Resources easily identifiable in AWS console (EC2, IAM, Systems Manager, Secrets Manager)
+- [ ] Resources can be filtered by project tag
+- [ ] No resources appear with generic IDs only
+
 **EKS Deployment (with Let's Encrypt TLS):**
 - [ ] cert-manager deployed successfully
 - [ ] ClusterIssuer created for Let's Encrypt
@@ -1818,6 +1870,8 @@ The deployment is considered successful when:
 
 3. **Infrastructure Quality**
    - All AWS resources follow best practices
+   - All resources properly named and tagged (Name, Project tags)
+   - Resources easily identifiable in AWS console
    - Security groups properly configured
    - Encryption enabled for data at rest
    - Private subnets used for compute
@@ -1942,6 +1996,7 @@ Example IAM policy: (for production, tighten further)
 | 1.0 | 2025-10-05 | System | Initial requirements document |
 | 1.1 | 2025-10-05 | System | Added FR-8 (Basic Authentication), FR-9 (Database Selection - SQLite vs PostgreSQL), updated Phase 4 to include basic auth configuration, added RDS provisioning requirements, updated cost estimates, updated acceptance criteria |
 | 1.2 | 2025-10-09 | System | **Cost Optimizations Applied**: Reduced NAT Gateways from 3 to 1 shared (saves ~$65/month), disabled NGINX ingress by default (saves ~$16/month), changed RDS to single-AZ by default (saves ~$15/month), updated PostgreSQL version to 15.14, updated all cost estimates to reflect optimizations (~$170-200/month vs ~$250-260/month) |
+| 1.3 | 2025-10-15 | System | **Resource Naming & Tagging Improvements**: Added FR-16 (Resource Naming and Tagging) as new requirement, enhanced tagging for EC2 instances (EKS nodes) with Name, Description, NodeGroup, and ManagedBy tags, added Name tags to all IAM roles, added descriptions and Name tags to SSM parameters, added Name tags to Secrets Manager secrets and EKS addons, improved acceptance criteria to include resource naming standards, all AWS resources now easily identifiable in console |
 
 ---
 
