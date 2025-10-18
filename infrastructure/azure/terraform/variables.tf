@@ -45,7 +45,7 @@ variable "cluster_name" {
 variable "kubernetes_version" {
   description = "Kubernetes version for AKS"
   type        = string
-  default     = "1.29"
+  default     = "1.31.11"
 }
 
 variable "dns_prefix" {

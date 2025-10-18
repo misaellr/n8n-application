@@ -35,8 +35,8 @@ class SetupInterrupted(Exception):
     """Raised when user interrupts the setup process"""
     pass
 
-class DeploymentConfig:
-    """Stores all configuration for the EKS deployment"""
+class AWSDeploymentConfig:
+    """Stores all configuration for AWS EKS deployment"""
     def __init__(self):
         self.aws_profile: Optional[str] = None
         self.aws_region: Optional[str] = None
@@ -94,23 +94,90 @@ class DeploymentConfig:
             'enable_basic_auth': self.enable_basic_auth,
         }
 
-class DependencyChecker:
-    """Checks for required CLI tools for EKS deployment"""
+# Backward compatibility alias
+DeploymentConfig = AWSDeploymentConfig
 
-    REQUIRED_TOOLS = {
+class AzureDeploymentConfig:
+    """Stores all configuration for Azure AKS deployment"""
+    def __init__(self):
+        self.cloud_provider: str = "azure"
+        self.azure_subscription_id: Optional[str] = None
+        self.azure_location: str = "eastus"
+        self.resource_group_name: str = "n8n-rg"
+        self.cluster_name: str = "n8n-aks-cluster"
+        self.kubernetes_version: str = "1.31.11"
+        self.node_vm_size: str = "Standard_D2s_v3"
+        self.node_count: int = 2
+        self.node_min_count: int = 1
+        self.node_max_count: int = 5
+        self.enable_auto_scaling: bool = True
+
+        # Application Configuration
+        self.n8n_namespace: str = "n8n"
+        self.n8n_host: str = ""
+        self.n8n_protocol: str = "http"
+        self.timezone: str = "America/Bahia"
+        self.n8n_encryption_key: str = ""
+        self.n8n_persistence_size: str = "10Gi"
+        self.enable_nginx_ingress: bool = True
+
+        # TLS Configuration
+        self.tls_certificate_source: str = "none"  # "none", "byo", or "letsencrypt"
+        self.tls_certificate_crt: str = ""
+        self.tls_certificate_key: str = ""
+        self.letsencrypt_email: str = ""
+        self.enable_cert_manager: bool = False
+
+        # Database Configuration
+        self.database_type: str = "sqlite"  # "sqlite" or "postgresql"
+        self.postgres_sku: str = "B_Standard_B1ms"
+        self.postgres_storage_gb: int = 32
+        self.postgres_high_availability: bool = False
+
+        # Basic Authentication
+        self.enable_basic_auth: bool = False
+        self.basic_auth_username: str = "admin"
+        self.basic_auth_password: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'cloud_provider': self.cloud_provider,
+            'azure_subscription_id': self.azure_subscription_id,
+            'azure_location': self.azure_location,
+            'resource_group_name': self.resource_group_name,
+            'cluster_name': self.cluster_name,
+            'kubernetes_version': self.kubernetes_version,
+            'node_vm_size': self.node_vm_size,
+            'node_count': self.node_count,
+            'node_min_count': self.node_min_count,
+            'node_max_count': self.node_max_count,
+            'enable_auto_scaling': self.enable_auto_scaling,
+            'n8n_namespace': self.n8n_namespace,
+            'n8n_host': self.n8n_host,
+            'n8n_protocol': self.n8n_protocol,
+            'timezone': self.timezone,
+            'n8n_persistence_size': self.n8n_persistence_size,
+            'enable_nginx_ingress': self.enable_nginx_ingress,
+            'tls_certificate_source': self.tls_certificate_source,
+            'letsencrypt_email': self.letsencrypt_email,
+            'enable_cert_manager': self.enable_cert_manager,
+            'database_type': self.database_type,
+            'postgres_sku': self.postgres_sku,
+            'postgres_storage_gb': self.postgres_storage_gb,
+            'postgres_high_availability': self.postgres_high_availability,
+            'enable_basic_auth': self.enable_basic_auth,
+        }
+
+class DependencyChecker:
+    """Checks for required CLI tools for deployment"""
+
+    COMMON_TOOLS = {
         'terraform': {
             'command': 'terraform version',
             'version_regex': r'Terraform v([0-9]+\.[0-9]+\.[0-9]+)',
             'min_version': '1.6.0',
             'install_url': 'https://developer.hashicorp.com/terraform/downloads',
             'description': 'Infrastructure as Code tool'
-        },
-        'aws': {
-            'command': 'aws --version',
-            'version_regex': r'aws-cli/([0-9]+\.[0-9]+\.[0-9]+)',
-            'min_version': '2.0.0',
-            'install_url': 'https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html',
-            'description': 'AWS Command Line Interface'
         },
         'helm': {
             'command': 'helm version',
@@ -134,6 +201,29 @@ class DependencyChecker:
             'install_url': 'https://www.openssl.org/source/',
         }
     }
+
+    AWS_TOOLS = {
+        'aws': {
+            'command': 'aws --version',
+            'version_regex': r'aws-cli/([0-9]+\.[0-9]+\.[0-9]+)',
+            'min_version': '2.0.0',
+            'install_url': 'https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html',
+            'description': 'AWS Command Line Interface'
+        }
+    }
+
+    AZURE_TOOLS = {
+        'az': {
+            'command': 'az version',
+            'version_regex': r'"azure-cli":\s*"([0-9]+\.[0-9]+\.[0-9]+)"',
+            'min_version': '2.50.0',
+            'install_url': 'https://learn.microsoft.com/en-us/cli/azure/install-azure-cli',
+            'description': 'Azure Command Line Interface'
+        }
+    }
+
+    # Backward compatibility
+    REQUIRED_TOOLS = {**COMMON_TOOLS, **AWS_TOOLS}
 
     @staticmethod
     def check_python_version() -> Tuple[bool, str]:
@@ -165,13 +255,18 @@ class DependencyChecker:
         return 0
 
     @classmethod
-    def check_all_dependencies(cls) -> Tuple[bool, list]:
-        """Check all required dependencies for EKS deployment"""
+    def check_all_dependencies(cls, cloud_provider: str = "aws") -> Tuple[bool, list]:
+        """Check all required dependencies for deployment
+
+        Args:
+            cloud_provider: Either "aws" or "azure"
+        """
         missing = []
         outdated = []
         import re
 
-        print(f"\n{Colors.HEADER}🔍 Checking dependencies for EKS deployment...{Colors.ENDC}")
+        provider_name = "AWS EKS" if cloud_provider == "aws" else "Azure AKS"
+        print(f"\n{Colors.HEADER}🔍 Checking dependencies for {provider_name} deployment...{Colors.ENDC}")
 
         # Check Python version first
         python_ok, python_info = cls.check_python_version()
@@ -184,8 +279,14 @@ class DependencyChecker:
             print(f"Please upgrade Python: {Colors.OKCYAN}https://www.python.org/downloads/{Colors.ENDC}\n")
             return False, [('python', {'description': 'Python 3.7+', 'install_url': 'https://www.python.org/downloads/'})]
 
+        # Select tools based on cloud provider
+        if cloud_provider == "azure":
+            required_tools = {**cls.COMMON_TOOLS, **cls.AZURE_TOOLS}
+        else:
+            required_tools = {**cls.COMMON_TOOLS, **cls.AWS_TOOLS}
+
         # Check all required tools
-        for tool, info in cls.REQUIRED_TOOLS.items():
+        for tool, info in required_tools.items():
             if not shutil.which(tool):
                 print(f"{Colors.FAIL}✗{Colors.ENDC} {tool} - NOT installed")
                 missing.append((tool, info))

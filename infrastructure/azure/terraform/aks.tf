@@ -19,7 +19,7 @@ resource "azurerm_kubernetes_cluster" "main" {
     vm_size             = var.node_vm_size
     os_disk_size_gb     = var.node_os_disk_size_gb
     vnet_subnet_id      = azurerm_subnet.private[0].id
-    zones               = local.availability_zones
+    # Let Azure handle zone distribution automatically for cross-region compatibility
     enable_auto_scaling = var.enable_auto_scaling
     node_count          = var.enable_auto_scaling ? null : var.node_count
     min_count           = var.enable_auto_scaling ? var.node_min_count : null
@@ -92,20 +92,31 @@ resource "azurerm_log_analytics_workspace" "main" {
 
 ########################################
 # Role Assignments
+# NOTE: These require "User Access Administrator" or "Owner" permissions
+# If you get authorization errors, ask your Azure admin to run these commands manually:
+#
+# az role assignment create --role "Network Contributor" \
+#   --assignee $(az aks show -g n8n-test-rg -n n8n-test-aks --query "identity.principalId" -o tsv) \
+#   --scope /subscriptions/013c5d82-8670-4c50-81d1-1c84a77a8303/resourceGroups/n8n-test-rg
+#
+# az role assignment create --role "Key Vault Secrets User" \
+#   --assignee $(az aks show -g n8n-test-rg -n n8n-test-aks --query "addonProfiles.azureKeyvaultSecretsProvider.identity.objectId" -o tsv) \
+#   --scope $(az keyvault show -g n8n-test-rg -n n8n-test-kv-6e3377c5 --query id -o tsv)
 ########################################
-# Grant AKS managed identity Network Contributor role on VNet
-resource "azurerm_role_assignment" "aks_network_contributor" {
-  scope                = azurerm_virtual_network.main.id
-  role_definition_name = "Network Contributor"
-  principal_id         = azurerm_kubernetes_cluster.main.identity[0].principal_id
-}
 
-# Grant AKS managed identity access to Key Vault
-resource "azurerm_role_assignment" "aks_keyvault_secrets_user" {
-  scope                = azurerm_key_vault.main.id
-  role_definition_name = "Key Vault Secrets User"
-  principal_id         = azurerm_kubernetes_cluster.main.key_vault_secrets_provider[0].secret_identity[0].object_id
-}
+# Commented out - requires elevated permissions
+# Uncomment if you have "User Access Administrator" or "Owner" role
+# resource "azurerm_role_assignment" "aks_network_contributor" {
+#   scope                = azurerm_resource_group.main.id
+#   role_definition_name = "Network Contributor"
+#   principal_id         = azurerm_kubernetes_cluster.main.identity[0].principal_id
+# }
+
+# resource "azurerm_role_assignment" "aks_keyvault_secrets_user" {
+#   scope                = azurerm_key_vault.main.id
+#   role_definition_name = "Key Vault Secrets User"
+#   principal_id         = azurerm_kubernetes_cluster.main.addonProfiles.azureKeyvaultSecretsProvider.identity.objectId
+# }
 
 ########################################
 # Storage Class for AKS (Azure Disk)

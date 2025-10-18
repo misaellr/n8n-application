@@ -38,9 +38,8 @@ provider "azurerm" {
 
 # Retrieve AKS cluster info for kubernetes/helm providers
 data "azurerm_kubernetes_cluster" "main" {
-  name                = azurerm_kubernetes_cluster.main.name
-  resource_group_name = azurerm_resource_group.main.name
-  depends_on          = [azurerm_kubernetes_cluster.main]
+  name                = var.cluster_name
+  resource_group_name = var.resource_group_name
 }
 
 provider "kubernetes" {
