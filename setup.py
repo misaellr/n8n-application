@@ -808,6 +808,251 @@ class ConfigurationPrompt:
         print("=" * 60)
         print(f"\n{Colors.WARNING}Note: TLS and Basic Auth will be configured after deployment{Colors.ENDC}")
 
+    def collect_azure_configuration(self, skip_tls: bool = True) -> AzureDeploymentConfig:
+        """Collect Azure configuration from user
+
+        Args:
+            skip_tls: If True, skip TLS configuration (TLS will be configured after LoadBalancer is ready)
+        """
+        print(f"\n{Colors.HEADER}{Colors.BOLD}N8N Azure AKS Deployment Configuration{Colors.ENDC}")
+        print("=" * 60)
+
+        # Azure Configuration
+        print(f"\n{Colors.BOLD}Azure Configuration{Colors.ENDC}")
+
+        # Get Azure subscription
+        try:
+            result = subprocess.run(
+                ['az', 'account', 'show', '--query', 'id', '-o', 'tsv'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                self.config.azure_subscription_id = result.stdout.strip()
+                print(f"\n{Colors.OKGREEN}✓ Using Azure subscription: {self.config.azure_subscription_id}{Colors.ENDC}")
+            else:
+                self.config.azure_subscription_id = self.prompt(
+                    "Azure Subscription ID",
+                    required=True
+                )
+        except:
+            self.config.azure_subscription_id = self.prompt(
+                "Azure Subscription ID",
+                required=True
+            )
+
+        # Azure Region/Location
+        common_locations = [
+            "eastus", "eastus2", "westus", "westus2", "centralus",
+            "northeurope", "westeurope", "southeastasia", "eastasia"
+        ]
+        print(f"\nCommon locations: {', '.join(common_locations)}")
+        self.config.azure_location = self.prompt(
+            "Azure Location (region)",
+            default="eastus",
+            required=True
+        )
+
+        # Resource Group
+        self.config.resource_group_name = self.prompt(
+            "Resource Group Name",
+            default="n8n-rg"
+        )
+
+        # AKS Cluster Configuration
+        print(f"\n{Colors.BOLD}AKS Cluster Configuration{Colors.ENDC}")
+
+        self.config.cluster_name = self.prompt(
+            "AKS Cluster Name",
+            default="n8n-aks-cluster"
+        )
+
+        # Kubernetes version
+        print(f"\nRecommended version: 1.31.11 (supports both Standard and Premium tiers)")
+        self.config.kubernetes_version = self.prompt(
+            "Kubernetes Version",
+            default="1.31.11"
+        )
+
+        # VM Size
+        vm_size_choices = [
+            "Standard_B2s      (~$30/month for 2 nodes)",
+            "Standard_D2s_v3   (~$140/month for 2 nodes) [Recommended]",
+            "Standard_D4s_v3   (~$280/month for 2 nodes)"
+        ]
+        vm_size_selection = self.prompt_choice(
+            "Node VM Size",
+            vm_size_choices,
+            default=1
+        )
+        self.config.node_vm_size = vm_size_selection.split()[0]
+
+        self.config.node_count = int(self.prompt(
+            "Initial number of nodes",
+            default="2"
+        ))
+
+        if self.prompt_yes_no("Enable cluster autoscaling?", default=True):
+            self.config.enable_auto_scaling = True
+            self.config.node_min_count = int(self.prompt(
+                "Minimum number of nodes",
+                default="1"
+            ))
+            self.config.node_max_count = int(self.prompt(
+                "Maximum number of nodes",
+                default="5"
+            ))
+        else:
+            self.config.enable_auto_scaling = False
+
+        # N8N Configuration
+        print(f"\n{Colors.BOLD}N8N Configuration{Colors.ENDC}")
+
+        self.config.n8n_namespace = self.prompt(
+            "Kubernetes namespace for n8n",
+            default="n8n"
+        )
+
+        self.config.n8n_host = self.prompt(
+            "N8N Hostname (FQDN for ingress)",
+            default="n8n.example.com",
+            required=True
+        )
+
+        self.config.n8n_persistence_size = self.prompt(
+            "Persistent volume size (e.g., 10Gi, 20Gi)",
+            default="10Gi"
+        )
+
+        # Timezone
+        common_timezones = [
+            "America/New_York", "America/Chicago", "America/Los_Angeles",
+            "America/Bahia", "Europe/London", "Europe/Paris", "Asia/Tokyo"
+        ]
+        print(f"\nCommon timezones: {', '.join(common_timezones)}")
+        self.config.timezone = self.prompt(
+            "Timezone",
+            default="America/Bahia"
+        )
+
+        # Encryption key
+        if self.prompt_yes_no("\nGenerate a new n8n encryption key?", default=True):
+            self.config.n8n_encryption_key = secrets.token_hex(32)
+            print(f"{Colors.OKGREEN}✓ Generated new encryption key{Colors.ENDC}")
+        else:
+            while True:
+                key = self.prompt(
+                    "Enter existing n8n encryption key (64 hex characters)",
+                    required=True
+                )
+                if len(key) == 64 and all(c in '0123456789abcdefABCDEF' for c in key):
+                    self.config.n8n_encryption_key = key
+                    break
+                else:
+                    print(f"{Colors.FAIL}✗ Invalid format. Key must be 64 hexadecimal characters.{Colors.ENDC}")
+
+        # Database Configuration
+        print(f"\n{Colors.BOLD}Database Configuration{Colors.ENDC}")
+        print("\nChoose database backend for n8n:")
+        db_choice = self.prompt_choice(
+            "Database Type",
+            [
+                "SQLite (file-based, simpler, lower cost)",
+                "PostgreSQL (Azure Flexible Server, production-grade, ~$20-80/month)"
+            ],
+            default=0
+        )
+
+        if "PostgreSQL" in db_choice:
+            self.config.database_type = "postgresql"
+
+            postgres_sku_choices = [
+                "B_Standard_B1ms  (Burstable, 1vCore, 2GB RAM, ~$20/month)",
+                "GP_Standard_D2s_v3 (General Purpose, 2vCore, 8GB RAM, ~$150/month)"
+            ]
+            sku_selection = self.prompt_choice(
+                "PostgreSQL SKU",
+                postgres_sku_choices,
+                default=0
+            )
+            self.config.postgres_sku = sku_selection.split()[0]
+
+            self.config.postgres_storage_gb = int(self.prompt(
+                "Storage size in GB",
+                default="32"
+            ))
+
+            self.config.postgres_high_availability = self.prompt_yes_no(
+                "Enable zone-redundant high availability? (increases cost)",
+                default=False
+            )
+        else:
+            self.config.database_type = "sqlite"
+
+        # Protocol (HTTP vs HTTPS)
+        if self.prompt_yes_no("\nEnable HTTPS/TLS?", default=False):
+            self.config.n8n_protocol = "https"
+            self.config.enable_cert_manager = self.prompt_yes_no(
+                "Install cert-manager for automatic TLS certificates?",
+                default=False
+            )
+            if self.config.enable_cert_manager:
+                self.config.letsencrypt_email = self.prompt(
+                    "Email for Let's Encrypt notifications",
+                    required=True
+                )
+        else:
+            self.config.n8n_protocol = "http"
+
+        # Basic Authentication
+        if self.prompt_yes_no("\nEnable basic authentication (username/password)?", default=False):
+            self.config.enable_basic_auth = True
+            self.config.basic_auth_username = self.prompt(
+                "Basic auth username",
+                default="admin"
+            )
+            while True:
+                password = self.prompt(
+                    "Basic auth password (min 8 characters)",
+                    required=True
+                )
+                if len(password) >= 8:
+                    self.config.basic_auth_password = password
+                    break
+                else:
+                    print(f"{Colors.FAIL}✗ Password must be at least 8 characters{Colors.ENDC}")
+        else:
+            self.config.enable_basic_auth = False
+
+        # Show configuration summary
+        print(f"\n{Colors.HEADER}{Colors.BOLD}Configuration Summary{Colors.ENDC}")
+        print("=" * 60)
+        print(f"Subscription:    {Colors.OKCYAN}{self.config.azure_subscription_id}{Colors.ENDC}")
+        print(f"Location:        {Colors.OKCYAN}{self.config.azure_location}{Colors.ENDC}")
+        print(f"Resource Group:  {Colors.OKCYAN}{self.config.resource_group_name}{Colors.ENDC}")
+        print(f"AKS Cluster:     {Colors.OKCYAN}{self.config.cluster_name}{Colors.ENDC}")
+        print(f"K8s Version:     {Colors.OKCYAN}{self.config.kubernetes_version}{Colors.ENDC}")
+        print(f"VM Size:         {Colors.OKCYAN}{self.config.node_vm_size}{Colors.ENDC}")
+        print(f"Node Count:      {Colors.OKCYAN}{self.config.node_count}{Colors.ENDC}")
+        if self.config.enable_auto_scaling:
+            print(f"Autoscaling:     {Colors.OKCYAN}{self.config.node_min_count}-{self.config.node_max_count} nodes{Colors.ENDC}")
+        print(f"N8N Host:        {Colors.OKCYAN}{self.config.n8n_host}{Colors.ENDC}")
+        print(f"Protocol:        {Colors.OKCYAN}{self.config.n8n_protocol.upper()}{Colors.ENDC}")
+        print(f"Namespace:       {Colors.OKCYAN}{self.config.n8n_namespace}{Colors.ENDC}")
+        print(f"PVC Size:        {Colors.OKCYAN}{self.config.n8n_persistence_size}{Colors.ENDC}")
+        print(f"Timezone:        {Colors.OKCYAN}{self.config.timezone}{Colors.ENDC}")
+        print(f"Encryption Key:  {Colors.OKCYAN}{'*' * 20} (hidden){Colors.ENDC}")
+        print(f"Database Type:   {Colors.OKCYAN}{self.config.database_type.upper()}{Colors.ENDC}")
+        if self.config.database_type == "postgresql":
+            print(f"  PostgreSQL SKU: {Colors.OKCYAN}{self.config.postgres_sku}{Colors.ENDC}")
+            print(f"  Storage:        {Colors.OKCYAN}{self.config.postgres_storage_gb}GB{Colors.ENDC}")
+            print(f"  High Avail:     {Colors.OKCYAN}{'Yes' if self.config.postgres_high_availability else 'No'}{Colors.ENDC}")
+        print("=" * 60)
+        print(f"\n{Colors.WARNING}Note: TLS and Basic Auth will be configured after deployment{Colors.ENDC}")
+
+        return self.config
+
 class FileUpdater:
     """Handles updating Terraform and Helm configuration files"""
 
