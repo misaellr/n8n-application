@@ -1,0 +1,51 @@
+# Azure AKS Deployment Configuration Example
+# Copy this file to infrastructure/azure/terraform/terraform.tfvars and customize
+
+# Azure Configuration
+azure_subscription_id = "your-subscription-id-here"
+azure_location        = "eastus"  # Options: eastus, westus2, westeurope, etc.
+
+# Resource Group
+resource_group_name = "n8n-rg"
+project_tag         = "n8n-app"
+
+# Virtual Network Configuration
+vnet_cidr = "10.0.0.0/16"
+
+# AKS Cluster Configuration
+cluster_name       = "n8n-aks-cluster"
+kubernetes_version = "1.29"
+
+# Node Pool Configuration
+node_vm_size      = "Standard_D2s_v3"  # Options: Standard_D2s_v3, Standard_D4s_v3, etc.
+node_count        = 2
+node_min_count    = 1
+node_max_count    = 5
+enable_auto_scaling = true
+
+# N8N Application Configuration
+n8n_host             = "n8n.yourdomain.com"
+n8n_namespace        = "n8n"
+n8n_protocol         = "http"  # Will be updated to https after TLS configuration
+n8n_persistence_size = "10Gi"
+timezone             = "America/Bahia"
+
+# Database Configuration
+database_type = "sqlite"  # Options: sqlite, postgresql
+# Uncomment for PostgreSQL (Azure Database for PostgreSQL - Flexible Server):
+# postgres_sku                = "B_Standard_B1ms"  # Options: B_Standard_B1ms, GP_Standard_D2s_v3
+# postgres_storage_gb         = 32
+# postgres_high_availability  = false
+# postgres_version            = "15"
+
+# Optional: Provide your own encryption key (64-character hex)
+# n8n_encryption_key = ""
+
+# Optional: Enable basic authentication
+# enable_basic_auth = false
+
+# Optional: Enable NGINX ingress controller
+enable_nginx_ingress = true
+
+# Optional: Enable cert-manager for Let's Encrypt
+# enable_cert_manager = false

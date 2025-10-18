@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: n8n
+  labels:
+    app: n8n
+  annotations:
+    checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: n8n
+  template:
+    metadata:
+      labels:
+        app: n8n
+      {{- if .Values.podAnnotations }}
+      annotations:
+{{ toYaml .Values.podAnnotations | indent 8 }}
+      {{- end }}
+    spec:
+      {{- if .Values.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml .Values.imagePullSecrets | indent 8 }}
+      {{- end }}
+      {{- if .Values.securityContext }}
+      securityContext:
+{{ toYaml .Values.securityContext | indent 8 }}
+      {{- end }}
+      containers:
+        - name: n8n
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 5678
+          env:
+{{- range $k, $v := .Values.env }}
+            - name: {{ $k }}
+              value: "{{ $v }}"
+{{- end }}
+{{- range $k, $v := .Values.envSecrets }}
+            - name: {{ $k }}
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-secrets
+                  key: {{ $k }}
+{{- end }}
+{{- if eq .Values.database.type "postgresql" }}
+            - name: DB_TYPE
+              value: "postgresdb"
+            - name: DB_POSTGRESDB_HOST
+              value: "{{ .Values.database.postgresql.host }}"
+            - name: DB_POSTGRESDB_PORT
+              value: "{{ .Values.database.postgresql.port }}"
+            - name: DB_POSTGRESDB_DATABASE
+              value: "{{ .Values.database.postgresql.database }}"
+            - name: DB_POSTGRESDB_USER
+              value: "{{ .Values.database.postgresql.user }}"
+            - name: DB_POSTGRESDB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-db-credentials
+                  key: password
+            - name: DB_POSTGRESDB_SSL_ENABLED
+              value: "true"
+            - name: DB_POSTGRESDB_SSL_REJECT_UNAUTHORIZED
+              value: "false"
+{{- end }}
+          volumeMounts:
+            - name: n8n-data
+              mountPath: /home/node/.n8n
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 5678
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 5678
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          {{- if .Values.resources }}
+          resources:
+{{ toYaml .Values.resources | indent 12 }}
+          {{- end }}
+      volumes:
+        - name: n8n-data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: n8n-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}

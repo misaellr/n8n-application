@@ -43,10 +43,42 @@ logs/
 *.log
 log/
 
-# Terraform
+# Terraform (Multi-Cloud)
+# AWS
+infrastructure/aws/terraform/.terraform/
+infrastructure/aws/terraform/.terraform.lock.hcl
+infrastructure/aws/terraform/terraform.tfstate*
+infrastructure/aws/terraform/terraform.tfvars
+infrastructure/aws/terraform/tfplan
+infrastructure/aws/terraform/*.backup
+infrastructure/aws/terraform/.terraform.tfstate.lock.info
+
+# Azure
+infrastructure/azure/terraform/.terraform/
+infrastructure/azure/terraform/.terraform.lock.hcl
+infrastructure/azure/terraform/terraform.tfstate*
+infrastructure/azure/terraform/terraform.tfvars
+infrastructure/azure/terraform/tfplan
+infrastructure/azure/terraform/*.backup
+infrastructure/azure/terraform/.terraform.tfstate.lock.info
+
+# GCP
+infrastructure/gcp/terraform/.terraform/
+infrastructure/gcp/terraform/.terraform.lock.hcl
+infrastructure/gcp/terraform/terraform.tfstate*
+infrastructure/gcp/terraform/terraform.tfvars
+infrastructure/gcp/terraform/tfplan
+infrastructure/gcp/terraform/*.backup
+infrastructure/gcp/terraform/.terraform.tfstate.lock.info
+
+# Legacy terraform directory (backward compatibility)
 .terraform/
 .terraform.lock.hcl
 terraform/.terraform.tfstate.lock.info
+terraform/terraform.tfstate*
+terraform/terraform.tfvars
+terraform/tfplan
+terraform/*.backup
 crash.log
 crash.*.log
 
@@ -55,9 +87,21 @@ crash.*.log
 kubeconfig
 .kube/
 
+# Cloud Provider Credentials
 # AWS
 .aws/
 aws-credentials
+*.pem
+
+# Azure
+.azure/
+*.publishsettings
+*.azureprofile
+
+# GCP
+.gcp/
+*-key.json
+service-account-*.json
 
 # Docker
 .dockerignore
