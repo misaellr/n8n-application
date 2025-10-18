@@ -1,5 +1,85 @@
 # N8N EKS Deployment - Changelog
 
+## Version 1.7.0 (2025-10-17)
+
+### New Features
+
+#### 1. Multi-Region Terraform State Management
+**Feature**: Added regionalization support for setup.py with automatic Terraform state backup and restore functionality.
+
+**Implementation**:
+- Region-specific state file management to prevent state conflicts across AWS regions
+- Automatic state backup when deploying to a new region
+- State restoration capability for switching between regional deployments
+- Timestamp-based state snapshots for rollback capability
+
+**Components**:
+- `save_state_for_region()` - Saves current Terraform state with region-specific naming
+- `restore_state_for_region()` - Restores Terraform state from region backup
+- `list_available_state_backups()` - Lists all available state backups
+- State validation to prevent overwriting non-empty states
+
+**Files Modified**:
+- `setup.py:946-1048` - Added state management functions
+- State files: `terraform.tfstate.<region>.backup` format
+
+**Usage**:
+```python
+# Automatically called during deployment
+save_state_for_region(terraform_dir, region="us-west-1")
+restore_state_for_region(terraform_dir, region="us-west-2")
+```
+
+**Benefits**:
+- Safe multi-region deployments without state conflicts
+- Ability to maintain separate n8n deployments in different AWS regions
+- Protection against accidental state overwrites
+- Easy region switching with state restoration
+
+---
+
+#### 2. Azure Kubernetes Service (AKS) Deployment Guide
+**Feature**: Comprehensive documentation for deploying n8n on Azure Kubernetes Service.
+
+**Implementation**:
+- Complete Azure deployment guide (azure.md) with 1,000+ lines of documentation
+- Mirrored architecture from AWS EKS deployment
+- Azure-specific components: AKS, VNet, Key Vault, Azure Database for PostgreSQL
+- Cost estimation for Azure infrastructure
+- Troubleshooting and operational best practices
+
+**Azure Components Documented**:
+- **Compute**: AKS cluster with VMSS node pools
+- **Networking**: VNet with public/private subnets, NAT Gateway, NSGs
+- **Storage**: Azure Disk CSI driver with Premium SSD
+- **Database**: Azure Database for PostgreSQL Flexible Server
+- **Secrets**: Azure Key Vault for credentials management
+- **Ingress**: NGINX controller with Azure Load Balancer
+
+**Files Added**:
+- `azure.md` - Complete Azure deployment guide
+
+**Topics Covered**:
+- Prerequisites and tool setup
+- 4-phase deployment workflow
+- Manual deployment steps
+- Configuration reference
+- Cost estimation (~$293-$493/month depending on configuration)
+- Monitoring, backup, and high availability
+- Security hardening and upgrade procedures
+- Comprehensive troubleshooting guide
+
+**Azure Services Mapped**:
+- EKS → AKS
+- VPC → Virtual Network (VNet)
+- RDS → Azure Database for PostgreSQL
+- SSM/Secrets Manager → Azure Key Vault
+- IAM Roles → Managed Identities
+- EBS → Azure Disk
+- ELB/NLB → Azure Load Balancer
+
+---
+
 ## Version 1.6.0 (2025-10-14)
 
 ### New Features
@@ -522,6 +602,7 @@ python3 setup.py
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.7.0 | 2025-10-17 | Multi-region state management, Azure AKS deployment guide |
 | 1.6.0 | 2025-10-14 | TLS/SSL cert automation, teardown functionality, multi-region support |
 | 1.5.0 | 2025-10-14 | Fixed PostgreSQL connection failures (security groups + SSL) |
 | 1.4.0 | 2025-10-14 | Fixed namespace creation race condition |
@@ -547,4 +628,4 @@ This deployment automation is provided as-is for N8N self-hosted deployments on 
 
 ---
 
-*Last Updated: October 14, 2025*
+*Last Updated: October 17, 2025*
