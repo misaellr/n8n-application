@@ -12,6 +12,7 @@ import shutil
 import tempfile
 import secrets
 import argparse
+import time
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 import signal
@@ -941,6 +942,146 @@ def load_existing_configuration(script_dir: Path) -> DeploymentConfig:
         raise ValueError("n8n_host is missing in terraform.tfvars")
 
     return config
+
+
+def save_state_for_region(terraform_dir: Path, region: str) -> bool:
+    """
+    Save current terraform state file with region-specific naming.
+
+    Args:
+        terraform_dir: Path to terraform directory
+        region: AWS region name (e.g., 'us-west-1')
+
+    Returns:
+        True if state was saved successfully, False otherwise
+    """
+    tfstate_path = terraform_dir / "terraform.tfstate"
+
+    # Check if state file exists and has resources
+    if not tfstate_path.exists():
+        print(f"{Colors.WARNING}⚠  No terraform state file found, nothing to save{Colors.ENDC}")
+        return False
+
+    # Check if state has resources (not empty state)
+    try:
+        with open(tfstate_path, 'r') as f:
+            state_data = json.load(f)
+            if not state_data.get('resources'):
+                print(f"{Colors.WARNING}⚠  Terraform state is empty (no resources), skipping backup{Colors.ENDC}")
+                return False
+    except (json.JSONDecodeError, Exception) as e:
+        print(f"{Colors.WARNING}⚠  Could not read state file: {e}{Colors.ENDC}")
+        return False
+
+    # Create region-specific backup
+    backup_path = terraform_dir / f"terraform.tfstate.{region}.backup"
+
+    try:
+        shutil.copy2(tfstate_path, backup_path)
+        print(f"{Colors.OKGREEN}✓ Saved state for region {region} to {backup_path.name}{Colors.ENDC}")
+        return True
+    except Exception as e:
+        print(f"{Colors.FAIL}✗ Failed to save state: {e}{Colors.ENDC}")
+        return False
+
+
+def restore_state_for_region(terraform_dir: Path, region: str) -> bool:
+    """
+    Restore terraform state from region-specific backup.
+
+    Args:
+        terraform_dir: Path to terraform directory
+        region: AWS region name (e.g., 'us-west-1')
+
+    Returns:
+        True if state was restored successfully, False otherwise
+    """
+    backup_path = terraform_dir / f"terraform.tfstate.{region}.backup"
+    tfstate_path = terraform_dir / "terraform.tfstate"
+
+    if not backup_path.exists():
+        print(f"{Colors.FAIL}✗ No backup found for region {region}{Colors.ENDC}")
+        print(f"{Colors.OKCYAN}Available backups:{Colors.ENDC}")
+        list_available_state_backups(terraform_dir)
+        return False
+
+    # Backup current state before overwriting (if it exists and has resources)
+    if tfstate_path.exists():
+        try:
+            with open(tfstate_path, 'r') as f:
+                state_data = json.load(f)
+                if state_data.get('resources'):
+                    # Save current state with timestamp
+                    timestamp = int(time.time())
+                    temp_backup = terraform_dir / f"terraform.tfstate.{timestamp}.backup"
+                    shutil.copy2(tfstate_path, temp_backup)
+                    print(f"{Colors.OKCYAN}  Current state backed up to {temp_backup.name}{Colors.ENDC}")
+        except Exception as e:
+            print(f"{Colors.WARNING}⚠  Could not backup current state: {e}{Colors.ENDC}")
+
+    # Restore the region-specific backup
+    try:
+        shutil.copy2(backup_path, tfstate_path)
+        print(f"{Colors.OKGREEN}✓ Restored state for region {region} from {backup_path.name}{Colors.ENDC}")
+
+        # Show what was restored
+        try:
+            with open(tfstate_path, 'r') as f:
+                state_data = json.load(f)
+                resource_count = len(state_data.get('resources', []))
+                print(f"{Colors.OKCYAN}  State contains {resource_count} resources{Colors.ENDC}")
+        except Exception:
+            pass
+
+        return True
+    except Exception as e:
+        print(f"{Colors.FAIL}✗ Failed to restore state: {e}{Colors.ENDC}")
+        return False
+
+
+def list_available_state_backups(terraform_dir: Path):
+    """List all available region-specific state backups."""
+    backups = sorted(terraform_dir.glob("terraform.tfstate.*.backup"))
+
+    if not backups:
+        print(f"  {Colors.WARNING}No region-specific backups found{Colors.ENDC}")
+        return
+
+    for backup in backups:
+        # Try to extract region from filename
+        filename = backup.name
+        # Pattern: terraform.tfstate.REGION.backup or terraform.tfstate.TIMESTAMP.backup
+        parts = filename.replace("terraform.tfstate.", "").replace(".backup", "")
+
+        # Check if it's a region name (contains letters) vs timestamp (only numbers)
+        if parts and not parts.isdigit():
+            # Try to read the backup to get info
+            try:
+                with open(backup, 'r') as f:
+                    state_data = json.load(f)
+                    resource_count = len(state_data.get('resources', []))
+                    file_size = backup.stat().st_size
+
+                    # Try to find EKS cluster ARN for confirmation
+                    region_from_arn = None
+                    for resource in state_data.get('resources', []):
+                        if resource.get('type') == 'aws_eks_cluster':
+                            instances = resource.get('instances', [])
+                            if instances:
+                                arn = instances[0].get('attributes', {}).get('arn', '')
+                                if arn:
+                                    # ARN format: arn:aws:eks:REGION:...
+                                    region_from_arn = arn.split(':')[3] if len(arn.split(':')) > 3 else None
+                                    break
+
+                    region_display = f"{parts}"
+                    if region_from_arn and region_from_arn != parts:
+                        region_display = f"{parts} (contains {region_from_arn} resources)"
+
+                    print(f"  • {region_display}: {resource_count} resources, {file_size/1024:.1f}KB")
+            except Exception:
+                print(f"  • {parts}: (unable to read)")
+
 
 class TerraformRunner:
     """Handles Terraform execution"""
@@ -2220,6 +2361,28 @@ def main():
                        help='Skip Terraform infrastructure deployment and start from application deployment (assumes infrastructure already exists)')
     parser.add_argument('--teardown', action='store_true',
                        help='Teardown and destroy all n8n deployment resources')
+    parser.add_argument('--restore-region', type=str, metavar='REGION',
+                       help='''Restore terraform state for a specific AWS region before running operations.
+
+Use this when you need to manage or teardown a cluster in a different region than the current state.
+
+EXAMPLES:
+  # Restore and teardown a cluster in us-west-1
+  python setup.py --restore-region us-west-1 --teardown
+
+  # Restore state to manage us-east-1 cluster manually
+  python setup.py --restore-region us-west-1
+  (then run: cd terraform && terraform destroy)
+
+  # List available region backups
+  ls -lh terraform/terraform.tfstate.*.backup
+
+WORKFLOW:
+  1. Deploy region1 (us-west-1) - state auto-saved to terraform.tfstate.us-west-1.backup
+  2. Deploy region2 (us-west-2) - state auto-saved to terraform.tfstate.us-west-2.backup
+  3. Restore region1: --restore-region us-west-1
+  4. Teardown region1: --restore-region us-west-1 --teardown
+''')
     args = parser.parse_args()
 
     script_dir = Path(__file__).parent
@@ -2235,6 +2398,26 @@ def main():
         deps_ok, missing = DependencyChecker.check_all_dependencies()
         if not deps_ok:
             sys.exit(1)
+
+        # Handle state restore if --restore-region is specified
+        if args.restore_region:
+            print(f"\n{Colors.HEADER}🔄 Restoring Terraform state for region: {args.restore_region}{Colors.ENDC}")
+            print("=" * 60)
+
+            if not restore_state_for_region(script_dir / "terraform", args.restore_region):
+                print(f"\n{Colors.FAIL}✗ Failed to restore state for region {args.restore_region}{Colors.ENDC}")
+                sys.exit(1)
+
+            print(f"\n{Colors.OKGREEN}✓ State restored successfully{Colors.ENDC}")
+
+            # If only restoring (no teardown or other operations), exit here
+            if not args.teardown and not args.configure_tls and not args.skip_terraform:
+                print(f"\n{Colors.OKCYAN}State has been restored. You can now run terraform commands manually:{Colors.ENDC}")
+                print(f"  cd terraform && terraform plan")
+                print(f"  cd terraform && terraform destroy")
+                print(f"\n{Colors.OKCYAN}Or run teardown:{Colors.ENDC}")
+                print(f"  python setup.py --teardown")
+                sys.exit(0)
 
         # Handle teardown
         if args.teardown:
@@ -2482,10 +2665,45 @@ def main():
             if not prompt.prompt_yes_no("\nProceed with Terraform apply?", default=True):
                 raise SetupInterrupted("User cancelled Terraform apply")
 
+            # Save current state before applying (to preserve previous region's state)
+            print(f"\n{Colors.HEADER}💾 Saving current state before deployment...{Colors.ENDC}")
+            tfstate_path = script_dir / "terraform" / "terraform.tfstate"
+            if tfstate_path.exists():
+                try:
+                    with open(tfstate_path, 'r') as f:
+                        existing_state = json.load(f)
+                        if existing_state.get('resources'):
+                            # Try to detect region from existing state
+                            existing_region = None
+                            for resource in existing_state.get('resources', []):
+                                if resource.get('type') == 'aws_eks_cluster':
+                                    instances = resource.get('instances', [])
+                                    if instances:
+                                        arn = instances[0].get('attributes', {}).get('arn', '')
+                                        if arn:
+                                            # ARN format: arn:aws:eks:REGION:...
+                                            existing_region = arn.split(':')[3] if len(arn.split(':')) > 3 else None
+                                            break
+
+                            if existing_region:
+                                save_state_for_region(script_dir / "terraform", existing_region)
+                            else:
+                                print(f"{Colors.OKCYAN}  Could not detect region from existing state, using timestamp backup{Colors.ENDC}")
+                                timestamp = int(time.time())
+                                backup_path = script_dir / "terraform" / f"terraform.tfstate.{timestamp}.backup"
+                                shutil.copy2(tfstate_path, backup_path)
+                                print(f"{Colors.OKGREEN}✓ Saved current state to {backup_path.name}{Colors.ENDC}")
+                except Exception as e:
+                    print(f"{Colors.WARNING}⚠  Could not save existing state: {e}{Colors.ENDC}")
+
             if not tf_runner.apply():
                 raise Exception("Terraform apply failed")
 
             print(f"\n{Colors.OKGREEN}✓ Infrastructure deployed successfully{Colors.ENDC}")
+
+            # Save newly created state with region name
+            print(f"\n{Colors.HEADER}💾 Saving state for region {config.aws_region}...{Colors.ENDC}")
+            save_state_for_region(script_dir / "terraform", config.aws_region)
 
             # Get outputs
             outputs = tf_runner.get_outputs()
