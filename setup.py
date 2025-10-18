@@ -2758,6 +2758,498 @@ class TeardownRunner:
 
         return success
 
+
+########################################
+# Azure Teardown Class
+########################################
+
+class AKSTeardown:
+    """Handles teardown of N8N AKS deployment"""
+
+    def __init__(self, script_dir: Path, config: AzureDeploymentConfig):
+        self.script_dir = script_dir
+        self.config = config
+        self.terraform_dir = script_dir / "infrastructure" / "azure" / "terraform"
+
+    def phase1_helm_releases(self) -> bool:
+        """Phase 1: Uninstall Helm releases"""
+        print(f"\n{Colors.HEADER}{Colors.BOLD}📦 PHASE 1: Uninstalling Helm Releases{Colors.ENDC}")
+        print("=" * 60)
+
+        # Check if cluster is accessible
+        try:
+            result = subprocess.run(
+                ['kubectl', 'cluster-info'],
+                capture_output=True,
+                timeout=10
+            )
+            if result.returncode != 0:
+                print(f"{Colors.WARNING}⚠  Cluster not accessible, skipping Helm cleanup{Colors.ENDC}")
+                print(f"{Colors.WARNING}  If cluster still exists, manually uninstall: helm uninstall n8n -n {self.config.n8n_namespace}{Colors.ENDC}")
+                return True
+        except Exception as e:
+            print(f"{Colors.WARNING}⚠  Cannot verify cluster access: {e}{Colors.ENDC}")
+            return True
+
+        success = True
+
+        # Uninstall n8n
+        print(f"\n{Colors.OKCYAN}Checking for n8n Helm release...{Colors.ENDC}")
+        try:
+            result = subprocess.run(
+                ['helm', 'list', '-n', self.config.n8n_namespace, '-o', 'json'],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode == 0:
+                releases = json.loads(result.stdout) if result.stdout.strip() else []
+                n8n_found = any(r.get('name') == 'n8n' for r in releases)
+
+                if n8n_found:
+                    print(f"{Colors.OKCYAN}  Uninstalling n8n...{Colors.ENDC}")
+                    result = subprocess.run(
+                        ['helm', 'uninstall', 'n8n', '-n', self.config.n8n_namespace],
+                        capture_output=True,
+                        text=True,
+                        timeout=60
+                    )
+                    if result.returncode == 0:
+                        print(f"{Colors.OKGREEN}  ✓ n8n uninstalled{Colors.ENDC}")
+                    else:
+                        print(f"{Colors.FAIL}  ✗ Failed to uninstall n8n{Colors.ENDC}")
+                        print(f"  {result.stderr}")
+                        success = False
+                else:
+                    print(f"{Colors.OKCYAN}  n8n Helm release not found{Colors.ENDC}")
+        except Exception as e:
+            print(f"{Colors.WARNING}  Error checking n8n release: {e}{Colors.ENDC}")
+            success = False
+
+        # Uninstall ingress-nginx
+        print(f"\n{Colors.OKCYAN}Checking for ingress-nginx Helm release...{Colors.ENDC}")
+        try:
+            result = subprocess.run(
+                ['helm', 'list', '-n', 'ingress-nginx', '-o', 'json'],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode == 0:
+                releases = json.loads(result.stdout) if result.stdout.strip() else []
+                nginx_found = any(r.get('name') == 'ingress-nginx' for r in releases)
+
+                if nginx_found:
+                    print(f"{Colors.OKCYAN}  Uninstalling ingress-nginx...{Colors.ENDC}")
+                    result = subprocess.run(
+                        ['helm', 'uninstall', 'ingress-nginx', '-n', 'ingress-nginx'],
+                        capture_output=True,
+                        text=True,
+                        timeout=60
+                    )
+                    if result.returncode == 0:
+                        print(f"{Colors.OKGREEN}  ✓ ingress-nginx uninstalled{Colors.ENDC}")
+                        print(f"{Colors.OKCYAN}  Waiting for LoadBalancer to be deleted...{Colors.ENDC}")
+                        import time
+                        time.sleep(30)
+                    else:
+                        print(f"{Colors.FAIL}  ✗ Failed to uninstall ingress-nginx{Colors.ENDC}")
+                        print(f"  {result.stderr}")
+                        success = False
+                else:
+                    print(f"{Colors.OKCYAN}  ingress-nginx Helm release not found{Colors.ENDC}")
+        except Exception as e:
+            print(f"{Colors.WARNING}  Error checking ingress-nginx release: {e}{Colors.ENDC}")
+            success = False
+
+        if success:
+            print(f"\n{Colors.OKGREEN}✓ Helm releases cleanup completed{Colors.ENDC}")
+        else:
+            print(f"\n{Colors.WARNING}⚠  Helm releases cleanup completed with warnings{Colors.ENDC}")
+
+        return success
+
+    def phase2_kubernetes_resources(self) -> bool:
+        """Phase 2: Remove Kubernetes resources"""
+        print(f"\n{Colors.HEADER}{Colors.BOLD}☸️  PHASE 2: Removing Kubernetes Resources{Colors.ENDC}")
+        print("=" * 60)
+
+        # Check cluster access
+        try:
+            result = subprocess.run(['kubectl', 'cluster-info'], capture_output=True, timeout=10)
+            if result.returncode != 0:
+                print(f"{Colors.WARNING}⚠  Cluster not accessible, skipping Kubernetes cleanup{Colors.ENDC}")
+                return True
+        except Exception:
+            print(f"{Colors.WARNING}⚠  Cluster not accessible, skipping Kubernetes cleanup{Colors.ENDC}")
+            return True
+
+        success = True
+
+        # Delete namespace (this will delete all resources in it)
+        print(f"\n{Colors.OKCYAN}Deleting namespace {self.config.n8n_namespace}...{Colors.ENDC}")
+        try:
+            result = subprocess.run(
+                ['kubectl', 'delete', 'namespace', self.config.n8n_namespace, '--ignore-not-found=true'],
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+            if result.returncode == 0:
+                print(f"{Colors.OKGREEN}  ✓ Namespace {self.config.n8n_namespace} deleted{Colors.ENDC}")
+            else:
+                print(f"{Colors.WARNING}  ⚠  Failed to delete namespace: {result.stderr}{Colors.ENDC}")
+                success = False
+        except Exception as e:
+            print(f"{Colors.WARNING}  ⚠  Error deleting namespace: {e}{Colors.ENDC}")
+            success = False
+
+        # Delete ingress-nginx namespace
+        print(f"\n{Colors.OKCYAN}Deleting namespace ingress-nginx...{Colors.ENDC}")
+        try:
+            result = subprocess.run(
+                ['kubectl', 'delete', 'namespace', 'ingress-nginx', '--ignore-not-found=true'],
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+            if result.returncode == 0:
+                print(f"{Colors.OKGREEN}  ✓ Namespace ingress-nginx deleted{Colors.ENDC}")
+            else:
+                print(f"{Colors.WARNING}  ⚠  Failed to delete namespace: {result.stderr}{Colors.ENDC}")
+        except Exception as e:
+            print(f"{Colors.WARNING}  ⚠  Error deleting namespace: {e}{Colors.ENDC}")
+
+        if success:
+            print(f"\n{Colors.OKGREEN}✓ Kubernetes resources cleanup completed{Colors.ENDC}")
+        else:
+            print(f"\n{Colors.WARNING}⚠  Kubernetes resources cleanup completed with warnings{Colors.ENDC}")
+
+        return success
+
+    def phase3_terraform_destroy(self) -> bool:
+        """Phase 3: Destroy Azure infrastructure"""
+        print(f"\n{Colors.HEADER}{Colors.BOLD}🏗️  PHASE 3: Destroying Azure Infrastructure{Colors.ENDC}")
+        print("=" * 60)
+
+        if not self.terraform_dir.exists():
+            print(f"{Colors.WARNING}⚠  Terraform directory not found: {self.terraform_dir}{Colors.ENDC}")
+            return True
+
+        # Run terraform destroy
+        print(f"\n{Colors.HEADER}Running Terraform destroy...{Colors.ENDC}")
+        print(f"{Colors.WARNING}This will delete all Azure infrastructure resources{Colors.ENDC}\n")
+
+        result = subprocess.run(
+            ['terraform', 'destroy', '-auto-approve'],
+            cwd=self.terraform_dir
+        )
+
+        if result.returncode == 0:
+            print(f"\n{Colors.OKGREEN}✓ Azure infrastructure destroyed{Colors.ENDC}")
+            return True
+        else:
+            print(f"\n{Colors.FAIL}✗ Terraform destroy failed{Colors.ENDC}")
+            print(f"{Colors.WARNING}You may need to manually destroy resources in Azure Portal{Colors.ENDC}")
+            return False
+
+    def phase4_keyvault_cleanup(self) -> bool:
+        """Phase 4: Clean up Azure Key Vault soft-deleted items"""
+        print(f"\n{Colors.HEADER}{Colors.BOLD}🔑 PHASE 4: Key Vault Cleanup{Colors.ENDC}")
+        print("=" * 60)
+
+        # Azure Key Vault has soft-delete enabled by default
+        # We may need to purge soft-deleted vaults
+        print(f"\n{Colors.OKCYAN}Checking for soft-deleted Key Vaults...{Colors.ENDC}")
+
+        try:
+            # List soft-deleted vaults
+            result = subprocess.run(
+                ['az', 'keyvault', 'list-deleted', '--query', '[].name', '-o', 'tsv'],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode == 0 and result.stdout.strip():
+                deleted_vaults = result.stdout.strip().split('\n')
+                print(f"{Colors.OKCYAN}  Found {len(deleted_vaults)} soft-deleted Key Vault(s){Colors.ENDC}")
+
+                # Check if any match our resource group pattern
+                for vault_name in deleted_vaults:
+                    if self.config.resource_group_name.replace('-', '') in vault_name:
+                        print(f"\n{Colors.WARNING}⚠  Soft-deleted Key Vault found: {vault_name}{Colors.ENDC}")
+                        print(f"{Colors.WARNING}  To permanently delete, run:{Colors.ENDC}")
+                        print(f"  {Colors.OKCYAN}az keyvault purge --name {vault_name}{Colors.ENDC}")
+            else:
+                print(f"{Colors.OKGREEN}  ✓ No soft-deleted Key Vaults found{Colors.ENDC}")
+
+        except Exception as e:
+            print(f"{Colors.WARNING}  ⚠  Could not check for soft-deleted vaults: {e}{Colors.ENDC}")
+
+        print(f"\n{Colors.OKGREEN}✓ Key Vault cleanup check completed{Colors.ENDC}")
+        return True
+
+    def execute(self) -> bool:
+        """Execute full teardown with confirmation"""
+        # Display warning banner
+        print(f"\n{Colors.RED}{Colors.BOLD}")
+        print("╔" + "═" * 58 + "╗")
+        print("║" + " " * 58 + "║")
+        print("║" + "     N8N AKS DEPLOYMENT TEARDOWN".center(58) + "║")
+        print("║" + " " * 58 + "║")
+        print("║" + "  This will PERMANENTLY DELETE all resources including:".ljust(59) + "║")
+        print("║" + "  • Kubernetes applications (n8n, ingress-nginx)".ljust(59) + "║")
+        print("║" + "  • AKS cluster and node pools".ljust(59) + "║")
+        print("║" + "  • PostgreSQL Flexible Server (if exists)".ljust(59) + "║")
+        print("║" + "  • VNet, subnets, NAT gateways, Public IPs".ljust(59) + "║")
+        print("║" + "  • Azure Key Vault and secrets".ljust(59) + "║")
+        print("║" + "  • Network Security Groups".ljust(59) + "║")
+        print("║" + " " * 58 + "║")
+        print("║" + "  ⚠️  THIS CANNOT BE UNDONE! ⚠️".center(62) + "║")
+        print("║" + " " * 58 + "║")
+        print("╚" + "═" * 58 + "╝")
+        print(Colors.ENDC)
+
+        prompt = ConfigurationPrompt()
+        if not prompt.prompt_yes_no("\n⚠️  Are you ABSOLUTELY SURE you want to proceed with the teardown?", default=False):
+            print(f"\n{Colors.OKCYAN}Teardown cancelled{Colors.ENDC}")
+            return False
+
+        print(f"\n{Colors.RED}{Colors.BOLD}Starting teardown in 5 seconds... Press Ctrl+C to cancel{Colors.ENDC}")
+        import time
+        try:
+            for i in range(5, 0, -1):
+                print(f"{i}...")
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print(f"\n{Colors.OKCYAN}Teardown cancelled{Colors.ENDC}")
+            return False
+
+        start_time = time.time()
+
+        # Execute teardown phases
+        success = True
+        success = self.phase1_helm_releases() and success
+        success = self.phase2_kubernetes_resources() and success
+        success = self.phase3_terraform_destroy() and success
+        success = self.phase4_keyvault_cleanup() and success
+
+        end_time = time.time()
+        duration = int(end_time - start_time)
+        minutes = duration // 60
+        seconds = duration % 60
+
+        # Summary
+        print(f"\n{Colors.HEADER}{Colors.BOLD}{'═' * 60}{Colors.ENDC}")
+        if success:
+            print(f"{Colors.OKGREEN}{Colors.BOLD}  ✅ TEARDOWN COMPLETE!{Colors.ENDC}")
+        else:
+            print(f"{Colors.WARNING}{Colors.BOLD}  ⚠️  TEARDOWN COMPLETED WITH WARNINGS{Colors.ENDC}")
+        print(f"{Colors.HEADER}{Colors.BOLD}{'═' * 60}{Colors.ENDC}")
+        print(f"\nTotal time: {minutes}m {seconds}s")
+
+        print(f"\n{Colors.BOLD}Next Steps:{Colors.ENDC}")
+        print(f"  • Verify resources deleted in Azure Portal")
+        print(f"  • Check for soft-deleted Key Vaults: {Colors.OKCYAN}az keyvault list-deleted{Colors.ENDC}")
+        print(f"  • Clean local files: {Colors.OKCYAN}rm -f infrastructure/azure/terraform/terraform.tfstate* infrastructure/azure/terraform/tfplan infrastructure/azure/terraform/terraform.tfvars{Colors.ENDC}")
+        print(f"  • Remove kubectl context: {Colors.OKCYAN}kubectl config delete-context $(kubectl config current-context){Colors.ENDC}")
+        print(f"\n{Colors.OKGREEN}To deploy again, run: {Colors.OKCYAN}python3 setup.py --cloud-provider azure{Colors.ENDC}\n")
+
+        return success
+
+
+########################################
+# Azure Deployment Functions
+########################################
+
+def deploy_azure_terraform(config: AzureDeploymentConfig, terraform_dir: Path) -> bool:
+    """Deploy Azure infrastructure with Terraform
+
+    Args:
+        config: Azure deployment configuration
+        terraform_dir: Path to Azure Terraform directory
+
+    Returns:
+        bool: True if deployment succeeded
+    """
+    print(f"\n{Colors.HEADER}{Colors.BOLD}🏗️  PHASE 1: Terraform Infrastructure Deployment{Colors.ENDC}")
+    print("=" * 60)
+
+    # Initialize Terraform using TerraformRunner
+    tf_runner = TerraformRunner(terraform_dir)
+
+    # Initialize
+    print(f"\n{Colors.HEADER}Initializing Terraform...{Colors.ENDC}")
+    if not tf_runner.init():
+        print(f"{Colors.FAIL}✗ Terraform init failed{Colors.ENDC}")
+        return False
+
+    # Plan
+    print(f"\n{Colors.HEADER}Planning infrastructure...{Colors.ENDC}")
+    success, output = tf_runner.plan(display_output=False)
+    if not success:
+        print(f"{Colors.FAIL}✗ Terraform plan failed{Colors.ENDC}")
+        print(output)
+        return False
+
+    # Show plan summary
+    print(f"{Colors.OKGREEN}✓ Terraform plan completed{Colors.ENDC}")
+    print(f"\n{Colors.BOLD}Plan Summary:{Colors.ENDC}")
+    print("=" * 60)
+    print(output)
+    print("=" * 60)
+
+    # Apply
+    print(f"\n{Colors.HEADER}Deploying infrastructure (this may take 10-15 minutes)...{Colors.ENDC}")
+    print(f"{Colors.WARNING}This will create real Azure resources and may incur costs.{Colors.ENDC}\n")
+
+    if not tf_runner.apply():
+        print(f"{Colors.FAIL}✗ Terraform apply failed{Colors.ENDC}")
+        return False
+
+    print(f"{Colors.OKGREEN}✓ Azure infrastructure deployed{Colors.ENDC}")
+
+    # Get kubeconfig
+    print(f"\n{Colors.HEADER}Configuring kubectl...{Colors.ENDC}")
+    result = subprocess.run([
+        'az', 'aks', 'get-credentials',
+        '--resource-group', config.resource_group_name,
+        '--name', config.cluster_name,
+        '--overwrite-existing'
+    ], capture_output=True, text=True)
+
+    if result.returncode == 0:
+        print(f"{Colors.OKGREEN}✓ kubectl configured for AKS cluster{Colors.ENDC}")
+    else:
+        print(f"{Colors.FAIL}✗ Failed to configure kubectl{Colors.ENDC}")
+        print(result.stderr)
+        return False
+
+    # Verify cluster access
+    result = subprocess.run(['kubectl', 'cluster-info'], capture_output=True, text=True, timeout=30)
+    if result.returncode == 0:
+        print(f"{Colors.OKGREEN}✓ Cluster accessible{Colors.ENDC}")
+    else:
+        print(f"{Colors.WARNING}⚠  Cluster info check failed, but continuing...{Colors.ENDC}")
+
+    return True
+
+
+def deploy_azure_helm(config: AzureDeploymentConfig, charts_dir: Path, encryption_key: str) -> bool:
+    """Deploy n8n to Azure AKS via Helm
+
+    Args:
+        config: Azure deployment configuration
+        charts_dir: Path to Helm charts directory
+        encryption_key: n8n encryption key
+
+    Returns:
+        bool: True if deployment succeeded
+    """
+    print(f"\n{Colors.HEADER}{Colors.BOLD}🚀 PHASE 2: Helm Application Deployment{Colors.ENDC}")
+    print("=" * 60)
+
+    # Get LoadBalancer IP from Azure (if available from Terraform outputs)
+    print(f"\n{Colors.HEADER}Checking for LoadBalancer IP...{Colors.ENDC}")
+    loadbalancer_ip = None
+
+    # Try to get from terraform outputs first
+    try:
+        terraform_dir = charts_dir.parent / "infrastructure" / "azure" / "terraform"
+        tf_runner = TerraformRunner(terraform_dir)
+        outputs = tf_runner.get_outputs()
+        loadbalancer_ip = outputs.get('loadbalancer_ip', None)
+        if loadbalancer_ip:
+            print(f"{Colors.OKGREEN}✓ LoadBalancer IP from Terraform: {loadbalancer_ip}{Colors.ENDC}")
+    except Exception as e:
+        print(f"{Colors.OKCYAN}  Could not get LoadBalancer IP from Terraform: {e}{Colors.ENDC}")
+
+    # Prepare Helm values
+    helm_values = {
+        'image.tag': 'latest',
+        'ingress.enabled': str(config.enable_nginx_ingress).lower(),
+        'ingress.className': 'nginx',
+        'ingress.host': config.n8n_host,
+        'ingress.allowLoadBalancerHostname': 'true',
+        'ingress.tls.enabled': str(config.enable_cert_manager).lower(),
+        'persistence.enabled': 'true',
+        'persistence.size': config.n8n_persistence_size,
+        'persistence.storageClass': 'managed-csi',
+        'env.N8N_HOST': config.n8n_host,
+        'env.N8N_PROTOCOL': config.n8n_protocol,
+        'env.GENERIC_TIMEZONE': config.timezone,
+        'env.TZ': config.timezone,
+    }
+
+    # Build helm command
+    helm_cmd = [
+        'helm', 'upgrade', '--install', 'n8n',
+        str(charts_dir / 'n8n'),
+        '--namespace', config.n8n_namespace,
+        '--create-namespace',
+        '--set-string', f'envSecrets.N8N_ENCRYPTION_KEY={encryption_key}'
+    ]
+
+    # Add other values
+    for key, value in helm_values.items():
+        helm_cmd.extend(['--set-string', f'{key}={value}'])
+
+    # Check if values-azure.yaml exists
+    values_azure = charts_dir / 'n8n' / 'values-azure.yaml'
+    if values_azure.exists():
+        helm_cmd.extend(['--values', str(values_azure)])
+        print(f"{Colors.OKCYAN}  Using values-azure.yaml{Colors.ENDC}")
+
+    # Deploy
+    print(f"\n{Colors.HEADER}Deploying n8n via Helm...{Colors.ENDC}")
+    result = subprocess.run(helm_cmd, capture_output=True, text=True, timeout=600)
+
+    if result.returncode != 0:
+        print(f"{Colors.FAIL}✗ Helm deployment failed{Colors.ENDC}")
+        print(result.stderr)
+        return False
+
+    print(f"{Colors.OKGREEN}✓ n8n deployed to Azure AKS{Colors.ENDC}")
+
+    # Wait for deployment to be ready
+    print(f"\n{Colors.HEADER}Waiting for n8n pods to be ready...{Colors.ENDC}")
+    result = subprocess.run([
+        'kubectl', 'wait', '--for=condition=ready',
+        'pod', '-l', 'app.kubernetes.io/name=n8n',
+        '-n', config.n8n_namespace,
+        '--timeout=300s'
+    ], capture_output=True, text=True)
+
+    if result.returncode == 0:
+        print(f"{Colors.OKGREEN}✓ n8n pods are ready{Colors.ENDC}")
+    else:
+        print(f"{Colors.WARNING}⚠  Pod readiness check timed out, check manually with:{Colors.ENDC}")
+        print(f"  {Colors.OKCYAN}kubectl get pods -n {config.n8n_namespace}{Colors.ENDC}")
+
+    # Show access information
+    print(f"\n{Colors.OKGREEN}{Colors.BOLD}{'=' * 60}{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}{Colors.BOLD}  ✅ N8N DEPLOYMENT COMPLETE!{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}{Colors.BOLD}{'=' * 60}{Colors.ENDC}")
+
+    if loadbalancer_ip:
+        print(f"\n{Colors.BOLD}Access Information:{Colors.ENDC}")
+        print(f"  n8n URL: {Colors.OKCYAN}{config.n8n_protocol}://{config.n8n_host}{Colors.ENDC}")
+        print(f"  LoadBalancer IP: {Colors.OKCYAN}{loadbalancer_ip}{Colors.ENDC}")
+        print(f"\n{Colors.WARNING}⚠  Configure DNS:{Colors.ENDC} Point {config.n8n_host} to {loadbalancer_ip}")
+    else:
+        print(f"\n{Colors.BOLD}Get LoadBalancer IP with:{Colors.ENDC}")
+        print(f"  {Colors.OKCYAN}kubectl get svc -n ingress-nginx ingress-nginx-controller{Colors.ENDC}")
+
+    print(f"\n{Colors.BOLD}Verify deployment:{Colors.ENDC}")
+    print(f"  {Colors.OKCYAN}kubectl get pods -n {config.n8n_namespace}{Colors.ENDC}")
+    print(f"  {Colors.OKCYAN}kubectl get svc -n {config.n8n_namespace}{Colors.ENDC}")
+
+    return True
+
+
 def main():
     """Main execution flow for N8N Multi-Cloud Deployment - 4 Phase Deployment"""
     # Parse command line arguments
@@ -2850,19 +3342,54 @@ WORKFLOW:
 
         # Handle teardown
         if args.teardown:
-            config = None
+            # Route to appropriate teardown based on cloud provider
+            if cloud_provider == "azure":
+                # Azure teardown flow
+                config = AzureDeploymentConfig()
 
-            # Try to load from terraform.tfvars first
-            try:
-                config = load_existing_configuration(script_dir)
-                print(f"{Colors.OKGREEN}✓ Loaded configuration from terraform.tfvars{Colors.ENDC}")
-            except Exception:
-                pass
+                # Try to detect config from Azure terraform.tfvars
+                tfvars_path = script_dir / "infrastructure" / "azure" / "terraform" / "terraform.tfvars"
+                if tfvars_path.exists():
+                    try:
+                        content = tfvars_path.read_text()
+                        for line in content.split('\n'):
+                            if 'resource_group_name' in line and '=' in line:
+                                config.resource_group_name = line.split('=')[1].strip().strip('"')
+                            elif 'cluster_name' in line and '=' in line:
+                                config.cluster_name = line.split('=')[1].strip().strip('"')
+                            elif 'n8n_namespace' in line and '=' in line:
+                                config.n8n_namespace = line.split('=')[1].strip().strip('"')
+                        print(f"{Colors.OKGREEN}✓ Loaded Azure configuration{Colors.ENDC}")
+                    except Exception as e:
+                        print(f"{Colors.WARNING}⚠  Could not load Azure config: {e}{Colors.ENDC}")
 
-            # If not found, try to detect from terraform state
-            if not config:
-                print(f"\n{Colors.HEADER}Detecting deployment configuration...{Colors.ENDC}")
-                config = DeploymentConfig()
+                # Show detected configuration
+                print(f"\n{Colors.HEADER}Azure AKS Teardown Configuration:{Colors.ENDC}")
+                print("=" * 60)
+                print(f"Resource Group:  {Colors.OKCYAN}{config.resource_group_name}{Colors.ENDC}")
+                print(f"Cluster:         {Colors.OKCYAN}{config.cluster_name}{Colors.ENDC}")
+                print(f"Namespace:       {Colors.OKCYAN}{config.n8n_namespace}{Colors.ENDC}")
+                print("=" * 60)
+
+                teardown = AKSTeardown(script_dir, config)
+                success = teardown.execute()
+                sys.exit(0 if success else 1)
+
+            else:
+                # AWS teardown flow (existing code)
+                config = None
+
+                # Try to load from terraform.tfvars first
+                try:
+                    config = load_existing_configuration(script_dir)
+                    print(f"{Colors.OKGREEN}✓ Loaded configuration from terraform.tfvars{Colors.ENDC}")
+                except Exception:
+                    pass
+
+                # If not found, try to detect from terraform state
+                if not config:
+                    print(f"\n{Colors.HEADER}Detecting deployment configuration...{Colors.ENDC}")
+                    config = DeploymentConfig()
 
                 detected_sources = []
 
@@ -3058,19 +3585,57 @@ WORKFLOW:
                     print(f"  {Colors.OKCYAN}{kubectl_cmd}{Colors.ENDC}")
                     raise Exception("kubectl configuration required")
         else:
-            # Collect configuration (skip TLS - will be configured after LoadBalancer is ready)
-            print(f"\n{Colors.HEADER}Let's configure your EKS deployment...{Colors.ENDC}")
-            prompt = ConfigurationPrompt()
-            config = prompt.collect_configuration(skip_tls=True)
+            # Route to appropriate deployment based on cloud provider
+            if cloud_provider == "azure":
+                # ═══════════════════════════════════════════════════════════════
+                # AZURE AKS DEPLOYMENT FLOW
+                # ═══════════════════════════════════════════════════════════════
 
-            # Update configuration files
-            updater = FileUpdater(script_dir)
-            updater.apply_configuration(config)
+                # Collect Azure configuration
+                print(f"\n{Colors.HEADER}Let's configure your Azure AKS deployment...{Colors.ENDC}")
+                prompt = ConfigurationPrompt(cloud_provider="azure")
+                config = prompt.collect_azure_configuration(skip_tls=True)
 
-            # ═══════════════════════════════════════════════════════════════
-            # PHASE 1: Deploy Infrastructure (Terraform)
-            # ═══════════════════════════════════════════════════════════════
-            print(f"\n{Colors.HEADER}{Colors.BOLD}📦 PHASE 1: Deploying Infrastructure{Colors.ENDC}")
+                # Create Terraform tfvars
+                updater = FileUpdater(script_dir)
+                updater.create_terraform_tfvars_azure(config)
+
+                # Deploy Azure infrastructure via Terraform
+                terraform_dir = script_dir / "infrastructure" / "azure" / "terraform"
+                if not deploy_azure_terraform(config, terraform_dir):
+                    raise Exception("Azure infrastructure deployment failed")
+
+                # Deploy n8n application via Helm
+                charts_dir = script_dir / "charts"
+                if not deploy_azure_helm(config, charts_dir, config.n8n_encryption_key):
+                    raise Exception("Azure n8n deployment failed")
+
+                print(f"\n{Colors.BOLD}Useful Commands:{Colors.ENDC}")
+                print(f"  {Colors.OKCYAN}kubectl get pods -n {config.n8n_namespace}{Colors.ENDC}")
+                print(f"  {Colors.OKCYAN}kubectl get ingress -n {config.n8n_namespace}{Colors.ENDC}")
+                print(f"  {Colors.OKCYAN}kubectl logs -f deployment/n8n -n {config.n8n_namespace}{Colors.ENDC}")
+                print(f"  {Colors.OKCYAN}kubectl get svc -n ingress-nginx{Colors.ENDC}")
+
+                print("\n" + "=" * 60)
+
+            else:
+                # ═══════════════════════════════════════════════════════════════
+                # AWS EKS DEPLOYMENT FLOW (existing code)
+                # ═══════════════════════════════════════════════════════════════
+
+                # Collect configuration (skip TLS - will be configured after LoadBalancer is ready)
+                print(f"\n{Colors.HEADER}Let's configure your EKS deployment...{Colors.ENDC}")
+                prompt = ConfigurationPrompt()
+                config = prompt.collect_configuration(skip_tls=True)
+
+                # Update configuration files
+                updater = FileUpdater(script_dir)
+                updater.apply_configuration(config)
+
+                # ═══════════════════════════════════════════════════════════════
+                # PHASE 1: Deploy Infrastructure (Terraform)
+                # ═══════════════════════════════════════════════════════════════
+                print(f"\n{Colors.HEADER}{Colors.BOLD}📦 PHASE 1: Deploying Infrastructure{Colors.ENDC}")
             print("=" * 60)
             print("This will create:")
             print("  • VPC, subnets, NAT gateways (~5 minutes)")
