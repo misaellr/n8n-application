@@ -1,0 +1,41 @@
+# Azure-specific overrides for n8n Helm chart
+# These values override the base values.yaml for Azure AKS deployments
+
+# Storage class for Azure Managed Disks
+persistence:
+  storageClass: "managed-premium"  # Azure Premium SSD storage class
+
+# Ingress configuration for Azure
+ingress:
+  className: "nginx"
+  annotations:
+    # Azure Load Balancer annotations
+    service.beta.kubernetes.io/azure-load-balancer-health-probe-request-path: "/healthz"
+
+# Environment variables specific to Azure
+env:
+  # Azure-specific environment variables can be added here
+  N8N_DIAGNOSTICS_ENABLED: "false"
+
+# Resource limits optimized for Azure VM sizes
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+# Node affinity for Azure availability zones (optional)
+# affinity:
+#   nodeAffinity:
+#     preferredDuringSchedulingIgnoredDuringExecution:
+#     - weight: 100
+#       preference:
+#         matchExpressions:
+#         - key: topology.kubernetes.io/zone
+#           operator: In
+#           values:
+#           - eastus-1
+#           - eastus-2
+#           - eastus-3

@@ -1,0 +1,43 @@
+# AWS-specific overrides for n8n Helm chart
+# These values override the base values.yaml for AWS EKS deployments
+
+# Storage class for AWS EBS
+persistence:
+  storageClass: "ebs-gp3"  # AWS EBS GP3 storage class
+
+# Ingress configuration for AWS
+ingress:
+  className: "nginx"
+  annotations:
+    # AWS Load Balancer annotations
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+
+# Environment variables specific to AWS
+env:
+  # AWS-specific environment variables can be added here
+  N8N_DIAGNOSTICS_ENABLED: "false"
+
+# Resource limits optimized for AWS instance types
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+# Node affinity for AWS availability zones (optional)
+# affinity:
+#   nodeAffinity:
+#     preferredDuringSchedulingIgnoredDuringExecution:
+#     - weight: 100
+#       preference:
+#         matchExpressions:
+#         - key: topology.kubernetes.io/zone
+#           operator: In
+#           values:
+#           - us-west-2a
+#           - us-west-2b
+#           - us-west-2c

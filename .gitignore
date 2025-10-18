@@ -62,15 +62,6 @@ infrastructure/azure/terraform/tfplan
 infrastructure/azure/terraform/*.backup
 infrastructure/azure/terraform/.terraform.tfstate.lock.info
 
-# GCP
-infrastructure/gcp/terraform/.terraform/
-infrastructure/gcp/terraform/.terraform.lock.hcl
-infrastructure/gcp/terraform/terraform.tfstate*
-infrastructure/gcp/terraform/terraform.tfvars
-infrastructure/gcp/terraform/tfplan
-infrastructure/gcp/terraform/*.backup
-infrastructure/gcp/terraform/.terraform.tfstate.lock.info
-
 # Legacy terraform directory (backward compatibility)
 .terraform/
 .terraform.lock.hcl
@@ -97,11 +88,6 @@ aws-credentials
 .azure/
 *.publishsettings
 *.azureprofile
-
-# GCP
-.gcp/
-*-key.json
-service-account-*.json
 
 # Docker
 .dockerignore
