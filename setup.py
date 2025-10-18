@@ -505,8 +505,17 @@ class AWSAuthChecker:
 class ConfigurationPrompt:
     """Handles interactive configuration prompts"""
 
-    def __init__(self):
-        self.config = DeploymentConfig()
+    def __init__(self, cloud_provider: str = "aws"):
+        """Initialize configuration prompt
+
+        Args:
+            cloud_provider: Either "aws" or "azure"
+        """
+        self.cloud_provider = cloud_provider
+        if cloud_provider == "azure":
+            self.config = AzureDeploymentConfig()
+        else:
+            self.config = AWSDeploymentConfig()
         self._interrupted = False
 
         # Setup interrupt handler
@@ -2453,9 +2462,11 @@ class TeardownRunner:
         return success
 
 def main():
-    """Main execution flow for N8N EKS deployment - 4 Phase Deployment"""
+    """Main execution flow for N8N Multi-Cloud Deployment - 4 Phase Deployment"""
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description='N8N EKS Deployment Setup')
+    parser = argparse.ArgumentParser(description='N8N Multi-Cloud Deployment Setup (AWS EKS / Azure AKS)')
+    parser.add_argument('--cloud-provider', type=str, choices=['aws', 'azure'],
+                       help='Cloud provider to use (aws or azure). If not specified, you will be prompted to choose.')
     parser.add_argument('--configure-tls', action='store_true',
                        help='Configure TLS for existing n8n deployment')
     parser.add_argument('--skip-terraform', action='store_true',
@@ -2488,15 +2499,35 @@ WORKFLOW:
 
     script_dir = Path(__file__).parent
 
-    print(f"{Colors.BOLD}{Colors.HEADER}")
+    # Determine cloud provider
+    cloud_provider = args.cloud_provider
+    if not cloud_provider:
+        # Prompt user to select cloud provider
+        print(f"{Colors.BOLD}{Colors.HEADER}")
+        print("=" * 60)
+        print("  N8N Multi-Cloud Deployment Setup")
+        print("=" * 60)
+        print(Colors.ENDC)
+
+        print(f"\n{Colors.HEADER}Select Cloud Provider:{Colors.ENDC}\n")
+        print(f"  {Colors.BOLD}1.{Colors.ENDC} AWS (Amazon Web Services) - EKS")
+        print(f"  {Colors.BOLD}2.{Colors.ENDC} Azure (Microsoft Azure) - AKS\n")
+
+        prompt = ConfigurationPrompt()
+        choice = prompt.prompt_choice("Which cloud provider would you like to use?", ["AWS", "Azure"], default=0)
+        cloud_provider = "aws" if choice == "AWS" else "azure"
+
+    # Display banner with selected provider
+    provider_name = "AWS EKS" if cloud_provider == "aws" else "Azure AKS"
+    print(f"\n{Colors.BOLD}{Colors.HEADER}")
     print("=" * 60)
-    print("  N8N EKS Deployment Setup")
+    print(f"  N8N {provider_name} Deployment Setup")
     print("=" * 60)
     print(Colors.ENDC)
 
     try:
-        # Check dependencies
-        deps_ok, missing = DependencyChecker.check_all_dependencies()
+        # Check dependencies for selected cloud provider
+        deps_ok, missing = DependencyChecker.check_all_dependencies(cloud_provider=cloud_provider)
         if not deps_ok:
             sys.exit(1)
 
