@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 import signal
+from datetime import datetime
 
 # ANSI color codes
 class Colors:
@@ -34,6 +35,133 @@ class Colors:
 class SetupInterrupted(Exception):
     """Raised when user interrupts the setup process"""
     pass
+
+class ConfigHistoryManager:
+    """Manages configuration history - saves every setup.py run for easy reference"""
+
+    HISTORY_FILE = "setup_history.log"
+    CURRENT_CONFIG_FILE = ".setup-current.json"
+
+    @staticmethod
+    def save_configuration(config: Any, cloud_provider: str, base_dir: Path):
+        """Save configuration to history file (prepended) and current config file"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Prepare configuration data
+        if hasattr(config, 'to_dict'):
+            config_dict = config.to_dict()
+        else:
+            config_dict = vars(config)
+
+        # Save current configuration as JSON for easy re-loading
+        current_file = base_dir / ConfigHistoryManager.CURRENT_CONFIG_FILE
+        try:
+            with open(current_file, 'w') as f:
+                json.dump({
+                    'timestamp': timestamp,
+                    'cloud_provider': cloud_provider,
+                    'configuration': config_dict
+                }, f, indent=2)
+        except Exception as e:
+            print(f"{Colors.WARNING}⚠ Warning: Could not save current config: {e}{Colors.ENDC}")
+
+        # Prepare history entry
+        history_entry = ConfigHistoryManager._format_history_entry(
+            timestamp, cloud_provider, config_dict
+        )
+
+        # Prepend to history file
+        history_file = base_dir / ConfigHistoryManager.HISTORY_FILE
+        try:
+            # Read existing content if file exists
+            existing_content = ""
+            if history_file.exists():
+                existing_content = history_file.read_text()
+
+            # Write new entry at the top
+            with open(history_file, 'w') as f:
+                f.write(history_entry)
+                f.write("\n" + "=" * 80 + "\n\n")
+                if existing_content:
+                    f.write(existing_content)
+
+            print(f"{Colors.OKGREEN}✓ Configuration saved to {ConfigHistoryManager.HISTORY_FILE}{Colors.ENDC}")
+        except Exception as e:
+            print(f"{Colors.WARNING}⚠ Warning: Could not save config history: {e}{Colors.ENDC}")
+
+    @staticmethod
+    def _format_history_entry(timestamp: str, cloud_provider: str, config_dict: Dict) -> str:
+        """Format a configuration as a readable markdown entry"""
+        lines = [
+            f"# Configuration - {timestamp}",
+            f"",
+            f"**Cloud Provider:** {cloud_provider.upper()}",
+            f"**Timestamp:** {timestamp}",
+            f"",
+            f"## Configuration Parameters",
+            f""
+        ]
+
+        # Group configuration by category
+        categories = {
+            'Cloud & Infrastructure': ['cloud_provider', 'aws_region', 'aws_profile', 'azure_subscription_id', 'azure_location', 'resource_group_name'],
+            'Cluster': ['cluster_name', 'kubernetes_version', 'node_vm_size', 'node_instance_types', 'node_count', 'node_desired_size', 'node_min_size', 'node_max_size', 'node_min_count', 'node_max_count', 'enable_auto_scaling'],
+            'Application': ['n8n_host', 'n8n_namespace', 'n8n_protocol', 'n8n_persistence_size', 'timezone', 'n8n_encryption_key'],
+            'Database': ['database_type', 'rds_instance_class', 'rds_allocated_storage', 'rds_multi_az', 'postgres_sku', 'postgres_storage_gb', 'postgres_high_availability'],
+            'Networking & Security': ['use_static_ip', 'enable_nginx_ingress', 'enable_basic_auth', 'basic_auth_username', 'enable_cert_manager', 'tls_certificate_source', 'letsencrypt_email'],
+            'Permissions': ['terraform_manage_role_assignments']
+        }
+
+        for category, keys in categories.items():
+            category_items = []
+            for key in keys:
+                if key in config_dict:
+                    value = config_dict[key]
+                    # Hide sensitive values
+                    if key in ['n8n_encryption_key', 'basic_auth_password']:
+                        value = "***REDACTED***"
+                    elif value == "":
+                        value = "(empty)"
+                    category_items.append(f"- **{key}**: `{value}`")
+
+            if category_items:
+                lines.append(f"### {category}")
+                lines.extend(category_items)
+                lines.append("")
+
+        # Add any remaining keys not in categories
+        uncategorized = []
+        all_categorized_keys = set(k for keys in categories.values() for k in keys)
+        for key, value in config_dict.items():
+            if key not in all_categorized_keys:
+                if key in ['n8n_encryption_key', 'basic_auth_password']:
+                    value = "***REDACTED***"
+                elif value == "":
+                    value = "(empty)"
+                uncategorized.append(f"- **{key}**: `{value}`")
+
+        if uncategorized:
+            lines.append("### Other")
+            lines.extend(uncategorized)
+            lines.append("")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def load_previous_configuration(base_dir: Path) -> Optional[Dict]:
+        """Load the most recent configuration from .setup-current.json"""
+        current_file = base_dir / ConfigHistoryManager.CURRENT_CONFIG_FILE
+
+        if not current_file.exists():
+            return None
+
+        try:
+            with open(current_file, 'r') as f:
+                data = json.load(f)
+            return data
+        except Exception as e:
+            print(f"{Colors.WARNING}⚠ Warning: Could not load previous config: {e}{Colors.ENDC}")
+            return None
 
 class AWSDeploymentConfig:
     """Stores all configuration for AWS EKS deployment"""
@@ -120,6 +248,8 @@ class AzureDeploymentConfig:
         self.n8n_encryption_key: str = ""
         self.n8n_persistence_size: str = "10Gi"
         self.enable_nginx_ingress: bool = True
+        self.use_static_ip: bool = False  # Use pre-allocated static IP
+        self.terraform_manage_role_assignments: bool = True  # Let Terraform create role assignments (requires elevated permissions)
 
         # TLS Configuration
         self.tls_certificate_source: str = "none"  # "none", "byo", or "letsencrypt"
@@ -158,6 +288,8 @@ class AzureDeploymentConfig:
             'timezone': self.timezone,
             'n8n_persistence_size': self.n8n_persistence_size,
             'enable_nginx_ingress': self.enable_nginx_ingress,
+            'use_static_ip': self.use_static_ip,
+            'terraform_manage_role_assignments': self.terraform_manage_role_assignments,
             'tls_certificate_source': self.tls_certificate_source,
             'letsencrypt_email': self.letsencrypt_email,
             'enable_cert_manager': self.enable_cert_manager,
@@ -990,6 +1122,39 @@ class ConfigurationPrompt:
         else:
             self.config.database_type = "sqlite"
 
+        # Azure Permissions Check
+        print(f"\n{Colors.BOLD}Azure Permissions{Colors.ENDC}")
+        print("\nAKS LoadBalancer services require the 'Network Contributor' role on the resource group.")
+        print("Terraform can automatically create this role assignment, but requires elevated permissions.")
+        print(f"\n{Colors.OKCYAN}Do you have 'User Access Administrator' or 'Owner' role?{Colors.ENDC}")
+
+        self.config.terraform_manage_role_assignments = self.prompt_yes_no(
+            "Let Terraform manage role assignments?",
+            default=True
+        )
+
+        if not self.config.terraform_manage_role_assignments:
+            print(f"\n{Colors.WARNING}⚠  You'll need to manually create role assignments BEFORE running Terraform:{Colors.ENDC}")
+            print(f"{Colors.OKCYAN}   # Network Contributor (required for LoadBalancer):{Colors.ENDC}")
+            print(f"{Colors.OKCYAN}   az role assignment create --role \"Network Contributor\" \\{Colors.ENDC}")
+            print(f"{Colors.OKCYAN}     --assignee $(az aks show -g <resource-group> -n <cluster-name> --query \"identity.principalId\" -o tsv) \\{Colors.ENDC}")
+            print(f"{Colors.OKCYAN}     --scope /subscriptions/<subscription-id>/resourceGroups/<resource-group>{Colors.ENDC}")
+            print(f"\n{Colors.OKCYAN}   # Key Vault Secrets User (required for Key Vault access):{Colors.ENDC}")
+            print(f"{Colors.OKCYAN}   az role assignment create --role \"Key Vault Secrets User\" \\{Colors.ENDC}")
+            print(f"{Colors.OKCYAN}     --assignee $(az aks show -g <resource-group> -n <cluster-name> --query \"keyVaultSecretsProvider.secretIdentity.objectId\" -o tsv) \\{Colors.ENDC}")
+            print(f"{Colors.OKCYAN}     --scope $(az keyvault show -g <resource-group> -n <keyvault-name> --query id -o tsv){Colors.ENDC}")
+
+        # Static IP Configuration
+        print(f"\n{Colors.BOLD}LoadBalancer IP Configuration{Colors.ENDC}")
+        print("\nChoose LoadBalancer IP allocation:")
+        print(f"{Colors.OKCYAN}• Static IP:{Colors.ENDC} Pre-allocated, survives cluster rebuilds")
+        print(f"{Colors.OKCYAN}• Dynamic IP:{Colors.ENDC} Azure auto-assigns, IP may change on cluster rebuild")
+
+        self.config.use_static_ip = self.prompt_yes_no(
+            "Use static IP? (Recommended for production)",
+            default=False
+        )
+
         # Protocol (HTTP vs HTTPS)
         if self.prompt_yes_no("\nEnable HTTPS/TLS?", default=False):
             self.config.n8n_protocol = "https"
@@ -1058,8 +1223,8 @@ class FileUpdater:
 
     def __init__(self, base_dir: Path):
         self.base_dir = base_dir
-        self.terraform_dir = base_dir / "terraform"
-        self.helm_dir = base_dir / "helm"
+        self.terraform_dir = base_dir / "terraform" / "aws"
+        self.helm_dir = base_dir / "charts" / "n8n"
         self.backup_dir: Optional[Path] = None
 
     def create_backup(self) -> Path:
@@ -1125,7 +1290,7 @@ class FileUpdater:
                 content = self._update_variable_default(content, var_name, str(value))
 
         variables_file.write_text(content)
-        print(f"{Colors.OKGREEN}✓ Updated terraform/variables.tf{Colors.ENDC}")
+        print(f"{Colors.OKGREEN}✓ Updated terraform/aws/variables.tf{Colors.ENDC}")
 
     def create_terraform_tfvars(self, config: DeploymentConfig):
         """Create terraform.tfvars for EKS infrastructure deployment"""
@@ -1169,11 +1334,11 @@ class FileUpdater:
 
         content = "\n".join(lines)
         tfvars_file.write_text(content)
-        print(f"{Colors.OKGREEN}✓ Created terraform/terraform.tfvars{Colors.ENDC}")
+        print(f"{Colors.OKGREEN}✓ Created terraform/aws/terraform.tfvars{Colors.ENDC}")
 
     def create_terraform_tfvars_azure(self, config: AzureDeploymentConfig):
         """Create terraform.tfvars for Azure AKS infrastructure deployment"""
-        tfvars_file = self.base_dir / "infrastructure" / "azure" / "terraform" / "terraform.tfvars"
+        tfvars_file = self.base_dir / "terraform" / "azure" / "terraform.tfvars"
 
         lines = [
             "# Auto-generated by setup.py - N8N Azure AKS Infrastructure",
@@ -1213,15 +1378,17 @@ class FileUpdater:
         lines.extend([
             "",
             "# Optional Features",
-            f'enable_nginx_ingress = {str(config.enable_nginx_ingress).lower()}',
-            f'enable_basic_auth    = {str(config.enable_basic_auth).lower()}',
-            f'enable_cert_manager  = {str(config.enable_cert_manager).lower()}',
+            f'use_static_ip                      = {str(config.use_static_ip).lower()}',
+            f'enable_nginx_ingress               = {str(config.enable_nginx_ingress).lower()}',
+            f'enable_basic_auth                  = {str(config.enable_basic_auth).lower()}',
+            f'enable_cert_manager                = {str(config.enable_cert_manager).lower()}',
+            f'terraform_manage_role_assignments  = {str(config.terraform_manage_role_assignments).lower()}',
         ])
 
         tfvars_file.parent.mkdir(parents=True, exist_ok=True)
         content = "\n".join(lines) + "\n"
         tfvars_file.write_text(content)
-        print(f"{Colors.OKGREEN}✓ Created infrastructure/azure/terraform/terraform.tfvars{Colors.ENDC}")
+        print(f"{Colors.OKGREEN}✓ Created terraform/azure/terraform.tfvars{Colors.ENDC}")
 
     def update_helm_values(self, config: DeploymentConfig):
         """Update Helm values file"""
@@ -1245,7 +1412,7 @@ class FileUpdater:
         )
 
         values_file.write_text(content)
-        print(f"{Colors.OKGREEN}✓ Updated helm/values.yaml{Colors.ENDC}")
+        print(f"{Colors.OKGREEN}✓ Updated charts/n8n/values.yaml{Colors.ENDC}")
 
     @staticmethod
     def _update_variable_default(content: str, var_name: str, value: str) -> str:
@@ -1293,11 +1460,11 @@ class FileUpdater:
 
 
 def load_existing_configuration(script_dir: Path) -> DeploymentConfig:
-    """Load deployment values from terraform/terraform.tfvars"""
-    tfvars_path = script_dir / "terraform" / "terraform.tfvars"
+    """Load deployment values from terraform/aws/terraform.tfvars"""
+    tfvars_path = script_dir / "terraform" / "aws" / "terraform.tfvars"
 
     if not tfvars_path.exists():
-        raise FileNotFoundError("terraform/terraform.tfvars not found; run initial setup first")
+        raise FileNotFoundError("terraform/aws/terraform.tfvars not found; run initial setup first")
 
     config = DeploymentConfig()
 
@@ -1353,11 +1520,11 @@ def load_existing_configuration(script_dir: Path) -> DeploymentConfig:
 
 def save_state_for_region(terraform_dir: Path, region: str) -> bool:
     """
-    Save current terraform state file with region-specific naming.
+    Save current terraform state file with region/location-specific naming.
 
     Args:
         terraform_dir: Path to terraform directory
-        region: AWS region name (e.g., 'us-west-1')
+        region: AWS region (e.g., 'us-west-1') or Azure location (e.g., 'eastus')
 
     Returns:
         True if state was saved successfully, False otherwise
@@ -1394,11 +1561,11 @@ def save_state_for_region(terraform_dir: Path, region: str) -> bool:
 
 def restore_state_for_region(terraform_dir: Path, region: str) -> bool:
     """
-    Restore terraform state from region-specific backup.
+    Restore terraform state from region/location-specific backup.
 
     Args:
         terraform_dir: Path to terraform directory
-        region: AWS region name (e.g., 'us-west-1')
+        region: AWS region (e.g., 'us-west-1') or Azure location (e.g., 'eastus')
 
     Returns:
         True if state was restored successfully, False otherwise
@@ -2081,10 +2248,10 @@ spec:
             return False
 
     # Upgrade n8n with TLS
-    helm_runner = HelmRunner(script_dir / "helm")
+    helm_runner = HelmRunner(script_dir / "charts" / "n8n")
 
     # Get encryption key from outputs
-    tf_runner = TerraformRunner(script_dir / "terraform")
+    tf_runner = TerraformRunner(script_dir / "terraform" / "aws")
     outputs = tf_runner.get_outputs()
     encryption_key = outputs.get('n8n_encryption_key_value', '')
 
@@ -2257,7 +2424,7 @@ def configure_basic_auth_interactive(config: DeploymentConfig, script_dir: Path,
     print(f"\n{Colors.HEADER}Enabling basic auth in n8n ingress...{Colors.ENDC}")
     try:
         result = subprocess.run([
-            'helm', 'upgrade', 'n8n', str(script_dir / 'helm'),
+            'helm', 'upgrade', 'n8n', str(script_dir / 'charts' / 'n8n'),
             '-n', namespace,
             '--reuse-values',
             '--set', 'ingress.basicAuth.enabled=true',
@@ -2280,7 +2447,7 @@ def configure_basic_auth_interactive(config: DeploymentConfig, script_dir: Path,
 
     # Update terraform.tfvars to track basic auth state for proper cleanup
     try:
-        tfvars_path = script_dir / "terraform" / "terraform.tfvars"
+        tfvars_path = script_dir / "terraform" / "aws" / "terraform.tfvars"
         if tfvars_path.exists():
             content = tfvars_path.read_text()
             # Update enable_basic_auth value
@@ -2311,7 +2478,7 @@ class TeardownRunner:
     def __init__(self, script_dir: Path, config: DeploymentConfig):
         self.script_dir = script_dir
         self.config = config
-        self.terraform_dir = script_dir / "terraform"
+        self.terraform_dir = script_dir / "terraform" / "aws"
 
     def phase1_helm_releases(self) -> bool:
         """Phase 1: Uninstall Helm releases"""
@@ -2752,7 +2919,7 @@ class TeardownRunner:
 
         print(f"\n{Colors.BOLD}Next Steps:{Colors.ENDC}")
         print(f"  • Verify DNS records are removed (if you created any)")
-        print(f"  • Clean local files: {Colors.OKCYAN}rm -f terraform/terraform.tfstate* terraform/tfplan terraform/terraform.tfvars{Colors.ENDC}")
+        print(f"  • Clean local files: {Colors.OKCYAN}rm -f terraform/aws/terraform.tfstate* terraform/aws/tfplan terraform/aws/terraform.tfvars{Colors.ENDC}")
         print(f"  • Remove kubectl context: {Colors.OKCYAN}kubectl config delete-context $(kubectl config current-context){Colors.ENDC}")
         print(f"\n{Colors.OKGREEN}To deploy again, run: {Colors.OKCYAN}python3 setup.py{Colors.ENDC}\n")
 
@@ -2769,7 +2936,7 @@ class AKSTeardown:
     def __init__(self, script_dir: Path, config: AzureDeploymentConfig):
         self.script_dir = script_dir
         self.config = config
-        self.terraform_dir = script_dir / "infrastructure" / "azure" / "terraform"
+        self.terraform_dir = script_dir / "terraform" / "azure"
 
     def phase1_helm_releases(self) -> bool:
         """Phase 1: Uninstall Helm releases"""
@@ -3054,7 +3221,7 @@ class AKSTeardown:
         print(f"\n{Colors.BOLD}Next Steps:{Colors.ENDC}")
         print(f"  • Verify resources deleted in Azure Portal")
         print(f"  • Check for soft-deleted Key Vaults: {Colors.OKCYAN}az keyvault list-deleted{Colors.ENDC}")
-        print(f"  • Clean local files: {Colors.OKCYAN}rm -f infrastructure/azure/terraform/terraform.tfstate* infrastructure/azure/terraform/tfplan infrastructure/azure/terraform/terraform.tfvars{Colors.ENDC}")
+        print(f"  • Clean local files: {Colors.OKCYAN}rm -f terraform/azure/terraform.tfstate* terraform/azure/tfplan terraform/azure/terraform.tfvars{Colors.ENDC}")
         print(f"  • Remove kubectl context: {Colors.OKCYAN}kubectl config delete-context $(kubectl config current-context){Colors.ENDC}")
         print(f"\n{Colors.OKGREEN}To deploy again, run: {Colors.OKCYAN}python3 setup.py --cloud-provider azure{Colors.ENDC}\n")
 
@@ -3102,6 +3269,36 @@ def deploy_azure_terraform(config: AzureDeploymentConfig, terraform_dir: Path) -
     print(output)
     print("=" * 60)
 
+    # Save current state before applying (to preserve previous location's state)
+    print(f"\n{Colors.HEADER}💾 Saving current state before deployment...{Colors.ENDC}")
+    tfstate_path = terraform_dir / "terraform.tfstate"
+    if tfstate_path.exists():
+        try:
+            with open(tfstate_path, 'r') as f:
+                existing_state = json.load(f)
+                if existing_state.get('resources'):
+                    # Try to detect location from existing state
+                    existing_location = None
+                    for resource in existing_state.get('resources', []):
+                        if resource.get('type') == 'azurerm_kubernetes_cluster':
+                            instances = resource.get('instances', [])
+                            if instances:
+                                location = instances[0].get('attributes', {}).get('location', '')
+                                if location:
+                                    existing_location = location
+                                    break
+
+                    if existing_location:
+                        save_state_for_region(terraform_dir, existing_location)
+                    else:
+                        print(f"{Colors.OKCYAN}  Could not detect location from existing state, using timestamp backup{Colors.ENDC}")
+                        timestamp = int(time.time())
+                        backup_path = terraform_dir / f"terraform.tfstate.{timestamp}.backup"
+                        shutil.copy2(tfstate_path, backup_path)
+                        print(f"{Colors.OKGREEN}✓ Saved current state to {backup_path.name}{Colors.ENDC}")
+        except Exception as e:
+            print(f"{Colors.WARNING}⚠  Could not save existing state: {e}{Colors.ENDC}")
+
     # Apply
     print(f"\n{Colors.HEADER}Deploying infrastructure (this may take 10-15 minutes)...{Colors.ENDC}")
     print(f"{Colors.WARNING}This will create real Azure resources and may incur costs.{Colors.ENDC}\n")
@@ -3111,6 +3308,10 @@ def deploy_azure_terraform(config: AzureDeploymentConfig, terraform_dir: Path) -
         return False
 
     print(f"{Colors.OKGREEN}✓ Azure infrastructure deployed{Colors.ENDC}")
+
+    # Save newly created state with location name
+    print(f"\n{Colors.HEADER}💾 Saving state for location {config.azure_location}...{Colors.ENDC}")
+    save_state_for_region(terraform_dir, config.azure_location)
 
     # Get kubeconfig
     print(f"\n{Colors.HEADER}Configuring kubectl...{Colors.ENDC}")
@@ -3158,7 +3359,7 @@ def deploy_azure_helm(config: AzureDeploymentConfig, charts_dir: Path, encryptio
 
     # Try to get from terraform outputs first
     try:
-        terraform_dir = charts_dir.parent / "infrastructure" / "azure" / "terraform"
+        terraform_dir = charts_dir.parent / "terraform" / "azure"
         tf_runner = TerraformRunner(terraform_dir)
         outputs = tf_runner.get_outputs()
         loadbalancer_ip = outputs.get('loadbalancer_ip', None)
@@ -3263,26 +3464,37 @@ def main():
     parser.add_argument('--teardown', action='store_true',
                        help='Teardown and destroy all n8n deployment resources')
     parser.add_argument('--restore-region', type=str, metavar='REGION',
-                       help='''Restore terraform state for a specific AWS region before running operations.
+                       help='''Restore terraform state for a specific AWS region or Azure location before running operations.
 
-Use this when you need to manage or teardown a cluster in a different region than the current state.
+Use this when you need to manage or teardown a cluster in a different region/location than the current state.
 
 EXAMPLES:
-  # Restore and teardown a cluster in us-west-1
-  python setup.py --restore-region us-west-1 --teardown
+  # AWS: Restore and teardown a cluster in us-west-1
+  python setup.py --cloud aws --restore-region us-west-1 --teardown
 
-  # Restore state to manage us-east-1 cluster manually
-  python setup.py --restore-region us-west-1
+  # Azure: Restore and teardown a cluster in eastus
+  python setup.py --cloud azure --restore-region eastus --teardown
+
+  # Restore state to manage cluster manually
+  python setup.py --cloud aws --restore-region us-west-1
   (then run: cd terraform && terraform destroy)
 
-  # List available region backups
-  ls -lh terraform/terraform.tfstate.*.backup
+  # List available region/location backups
+  ls -lh terraform/aws/terraform.tfstate.*.backup    # AWS
+  ls -lh terraform/azure/terraform.tfstate.*.backup  # Azure
 
 WORKFLOW:
-  1. Deploy region1 (us-west-1) - state auto-saved to terraform.tfstate.us-west-1.backup
-  2. Deploy region2 (us-west-2) - state auto-saved to terraform.tfstate.us-west-2.backup
-  3. Restore region1: --restore-region us-west-1
-  4. Teardown region1: --restore-region us-west-1 --teardown
+  AWS:
+    1. Deploy region1 (us-west-1) - state auto-saved to terraform.tfstate.us-west-1.backup
+    2. Deploy region2 (us-west-2) - state auto-saved to terraform.tfstate.us-west-2.backup
+    3. Restore region1: --cloud aws --restore-region us-west-1
+    4. Teardown region1: --cloud aws --restore-region us-west-1 --teardown
+
+  Azure:
+    1. Deploy location1 (eastus) - state auto-saved to terraform.tfstate.eastus.backup
+    2. Deploy location2 (westus2) - state auto-saved to terraform.tfstate.westus2.backup
+    3. Restore location1: --cloud azure --restore-region eastus
+    4. Teardown location1: --cloud azure --restore-region eastus --teardown
 ''')
     args = parser.parse_args()
 
@@ -3322,22 +3534,34 @@ WORKFLOW:
 
         # Handle state restore if --restore-region is specified
         if args.restore_region:
-            print(f"\n{Colors.HEADER}🔄 Restoring Terraform state for region: {args.restore_region}{Colors.ENDC}")
+            region_type = "region" if cloud_provider == "aws" else "location"
+            print(f"\n{Colors.HEADER}🔄 Restoring Terraform state for {region_type}: {args.restore_region}{Colors.ENDC}")
             print("=" * 60)
 
-            if not restore_state_for_region(script_dir / "terraform", args.restore_region):
-                print(f"\n{Colors.FAIL}✗ Failed to restore state for region {args.restore_region}{Colors.ENDC}")
+            # Determine terraform directory based on cloud provider
+            if cloud_provider == "azure":
+                terraform_dir = script_dir / "terraform" / "azure"
+            else:
+                terraform_dir = script_dir / "terraform" / "aws"
+
+            if not restore_state_for_region(terraform_dir, args.restore_region):
+                print(f"\n{Colors.FAIL}✗ Failed to restore state for {region_type} {args.restore_region}{Colors.ENDC}")
                 sys.exit(1)
 
             print(f"\n{Colors.OKGREEN}✓ State restored successfully{Colors.ENDC}")
 
             # If only restoring (no teardown or other operations), exit here
             if not args.teardown and not args.configure_tls and not args.skip_terraform:
+                if cloud_provider == "azure":
+                    tf_path = "terraform/azure"
+                else:
+                    tf_path = "terraform/aws"
+
                 print(f"\n{Colors.OKCYAN}State has been restored. You can now run terraform commands manually:{Colors.ENDC}")
-                print(f"  cd terraform && terraform plan")
-                print(f"  cd terraform && terraform destroy")
+                print(f"  cd {tf_path} && terraform plan")
+                print(f"  cd {tf_path} && terraform destroy")
                 print(f"\n{Colors.OKCYAN}Or run teardown:{Colors.ENDC}")
-                print(f"  python setup.py --teardown")
+                print(f"  python setup.py --cloud {cloud_provider} --teardown")
                 sys.exit(0)
 
         # Handle teardown
@@ -3348,7 +3572,7 @@ WORKFLOW:
                 config = AzureDeploymentConfig()
 
                 # Try to detect config from Azure terraform.tfvars
-                tfvars_path = script_dir / "infrastructure" / "azure" / "terraform" / "terraform.tfvars"
+                tfvars_path = script_dir / "terraform" / "azure" / "terraform.tfvars"
                 if tfvars_path.exists():
                     try:
                         content = tfvars_path.read_text()
@@ -3394,7 +3618,7 @@ WORKFLOW:
                 detected_sources = []
 
                 # Try terraform.tfvars
-                tfvars_path = script_dir / "terraform" / "terraform.tfvars"
+                tfvars_path = script_dir / "terraform" / "aws" / "terraform.tfvars"
                 if tfvars_path.exists():
                     try:
                         content = tfvars_path.read_text()
@@ -3411,11 +3635,11 @@ WORKFLOW:
 
                 # Try terraform.tfstate
                 if not config.aws_region:
-                    tfstate_path = script_dir / "terraform" / "terraform.tfstate"
+                    tfstate_path = script_dir / "terraform" / "aws" / "terraform.tfstate"
                     if tfstate_path.exists():
                         try:
                             result = subprocess.run(
-                                ['terraform', '-chdir=' + str(script_dir / "terraform"), 'output', '-json'],
+                                ['terraform', '-chdir=' + str(script_dir / "terraform" / "aws"), 'output', '-json'],
                                 capture_output=True,
                                 text=True,
                                 timeout=30
@@ -3550,10 +3774,10 @@ WORKFLOW:
                 print("Run the full deployment once before using --skip-terraform.")
                 sys.exit(1)
 
-            tf_runner = TerraformRunner(script_dir / "terraform")
+            tf_runner = TerraformRunner(script_dir / "terraform" / "aws")
 
             # Verify Terraform state exists
-            tfstate_path = script_dir / "terraform" / "terraform.tfstate"
+            tfstate_path = script_dir / "terraform" / "aws" / "terraform.tfstate"
             if not tfstate_path.exists():
                 print(f"{Colors.FAIL}✗ Terraform state not found{Colors.ENDC}")
                 print("Infrastructure must be deployed first. Run without --skip-terraform.")
@@ -3596,12 +3820,15 @@ WORKFLOW:
                 prompt = ConfigurationPrompt(cloud_provider="azure")
                 config = prompt.collect_azure_configuration(skip_tls=True)
 
+                # Save configuration to history
+                ConfigHistoryManager.save_configuration(config, "azure", script_dir)
+
                 # Create Terraform tfvars
                 updater = FileUpdater(script_dir)
                 updater.create_terraform_tfvars_azure(config)
 
                 # Deploy Azure infrastructure via Terraform
-                terraform_dir = script_dir / "infrastructure" / "azure" / "terraform"
+                terraform_dir = script_dir / "terraform" / "azure"
                 if not deploy_azure_terraform(config, terraform_dir):
                     raise Exception("Azure infrastructure deployment failed")
 
@@ -3628,6 +3855,9 @@ WORKFLOW:
                 prompt = ConfigurationPrompt()
                 config = prompt.collect_configuration(skip_tls=True)
 
+                # Save configuration to history
+                ConfigHistoryManager.save_configuration(config, "aws", script_dir)
+
                 # Update configuration files
                 updater = FileUpdater(script_dir)
                 updater.apply_configuration(config)
@@ -3644,7 +3874,7 @@ WORKFLOW:
             print("  • EBS CSI driver and StorageClass")
             print(f"\n{Colors.WARNING}⏱  Estimated time: ~22-27 minutes{Colors.ENDC}\n")
 
-            tf_runner = TerraformRunner(script_dir / "terraform")
+            tf_runner = TerraformRunner(script_dir / "terraform" / "aws")
 
             if not tf_runner.init():
                 raise Exception("Terraform initialization failed")
@@ -3661,7 +3891,7 @@ WORKFLOW:
 
             # Save current state before applying (to preserve previous region's state)
             print(f"\n{Colors.HEADER}💾 Saving current state before deployment...{Colors.ENDC}")
-            tfstate_path = script_dir / "terraform" / "terraform.tfstate"
+            tfstate_path = script_dir / "terraform" / "aws" / "terraform.tfstate"
             if tfstate_path.exists():
                 try:
                     with open(tfstate_path, 'r') as f:
@@ -3680,11 +3910,11 @@ WORKFLOW:
                                             break
 
                             if existing_region:
-                                save_state_for_region(script_dir / "terraform", existing_region)
+                                save_state_for_region(script_dir / "terraform" / "aws", existing_region)
                             else:
                                 print(f"{Colors.OKCYAN}  Could not detect region from existing state, using timestamp backup{Colors.ENDC}")
                                 timestamp = int(time.time())
-                                backup_path = script_dir / "terraform" / f"terraform.tfstate.{timestamp}.backup"
+                                backup_path = script_dir / "terraform" / "aws" / f"terraform.tfstate.{timestamp}.backup"
                                 shutil.copy2(tfstate_path, backup_path)
                                 print(f"{Colors.OKGREEN}✓ Saved current state to {backup_path.name}{Colors.ENDC}")
                 except Exception as e:
@@ -3697,7 +3927,7 @@ WORKFLOW:
 
             # Save newly created state with region name
             print(f"\n{Colors.HEADER}💾 Saving state for region {config.aws_region}...{Colors.ENDC}")
-            save_state_for_region(script_dir / "terraform", config.aws_region)
+            save_state_for_region(script_dir / "terraform" / "aws", config.aws_region)
 
             # Get outputs
             outputs = tf_runner.get_outputs()
@@ -3721,7 +3951,7 @@ WORKFLOW:
         print(f"\n{Colors.HEADER}{Colors.BOLD}🚀 PHASE 2: Deploying n8n Application{Colors.ENDC}")
         print("=" * 60)
 
-        helm_runner = HelmRunner(script_dir / "helm")
+        helm_runner = HelmRunner(script_dir / "charts" / "n8n")
         encryption_key = outputs.get('n8n_encryption_key_value', '')
 
         if not encryption_key:

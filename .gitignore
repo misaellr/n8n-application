@@ -45,31 +45,24 @@ log/
 
 # Terraform (Multi-Cloud)
 # AWS
-infrastructure/aws/terraform/.terraform/
-infrastructure/aws/terraform/.terraform.lock.hcl
-infrastructure/aws/terraform/terraform.tfstate*
-infrastructure/aws/terraform/terraform.tfvars
-infrastructure/aws/terraform/tfplan
-infrastructure/aws/terraform/*.backup
-infrastructure/aws/terraform/.terraform.tfstate.lock.info
+terraform/aws/.terraform/
+terraform/aws/.terraform.lock.hcl
+terraform/aws/terraform.tfstate*
+terraform/aws/terraform.tfvars
+terraform/aws/tfplan
+terraform/aws/*.backup
+terraform/aws/.terraform.tfstate.lock.info
 
 # Azure
-infrastructure/azure/terraform/.terraform/
-infrastructure/azure/terraform/.terraform.lock.hcl
-infrastructure/azure/terraform/terraform.tfstate*
-infrastructure/azure/terraform/terraform.tfvars
-infrastructure/azure/terraform/tfplan
-infrastructure/azure/terraform/*.backup
-infrastructure/azure/terraform/.terraform.tfstate.lock.info
+terraform/azure/.terraform/
+terraform/azure/.terraform.lock.hcl
+terraform/azure/terraform.tfstate*
+terraform/azure/terraform.tfvars
+terraform/azure/tfplan
+terraform/azure/*.backup
+terraform/azure/.terraform.tfstate.lock.info
 
-# Legacy terraform directory (backward compatibility)
-.terraform/
-.terraform.lock.hcl
-terraform/.terraform.tfstate.lock.info
-terraform/terraform.tfstate*
-terraform/terraform.tfvars
-terraform/tfplan
-terraform/*.backup
+# Terraform global patterns
 crash.log
 crash.*.log
 
@@ -180,5 +173,10 @@ Session.vim
 Icon?
 # Documentation
 AGENTS.md
-#Python cache
+learnings/
+
+# Python cache
 __pycache__/
+
+# Setup configuration (current config only - history is committed)
+.setup-current.json

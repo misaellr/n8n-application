@@ -106,7 +106,7 @@ Examples:
         elif cloud == "azure":
             print_info("Azure deployment infrastructure is being set up.")
             print_info("Azure deployment will be available in the next release.")
-            print_info("Infrastructure files will be located in: infrastructure/azure/terraform/")
+            print_info("Infrastructure files will be located in: terraform/azure/")
             sys.exit(0)
 
     except SetupInterrupted:

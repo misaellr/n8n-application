@@ -1,6 +1,0 @@
-apiVersion: v2
-name: n8n
-description: Minimal Helm chart for n8n
-type: application
-version: 0.1.0
-appVersion: latest
