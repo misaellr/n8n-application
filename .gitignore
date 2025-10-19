@@ -44,12 +44,13 @@ logs/
 log/
 
 # Terraform (Multi-Cloud)
+# CRITICAL: These files contain secrets and should NEVER be committed
 # AWS
 terraform/aws/.terraform/
 terraform/aws/.terraform.lock.hcl
 terraform/aws/terraform.tfstate*
 terraform/aws/terraform.tfvars
-terraform/aws/tfplan
+terraform/aws/tfplan*
 terraform/aws/*.backup
 terraform/aws/.terraform.tfstate.lock.info
 
@@ -58,11 +59,17 @@ terraform/azure/.terraform/
 terraform/azure/.terraform.lock.hcl
 terraform/azure/terraform.tfstate*
 terraform/azure/terraform.tfvars
-terraform/azure/tfplan
+terraform/azure/tfplan*
 terraform/azure/*.backup
 terraform/azure/.terraform.tfstate.lock.info
 
 # Terraform global patterns
+**/terraform.tfstate
+**/terraform.tfstate.*
+**/terraform.tfvars
+**/.terraform/
+**/tfplan
+**/tfplan.*
 crash.log
 crash.*.log
 
@@ -178,5 +185,9 @@ learnings/
 # Python cache
 __pycache__/
 
-# Setup configuration (current config only - history is committed)
+# Setup configuration and history
 .setup-current.json
+setup_history.log
+
+# Migration backups (large files)
+.migration-backup/
