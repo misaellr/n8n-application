@@ -20,7 +20,6 @@ from datetime import datetime
 
 # ANSI color codes
 class Colors:
-    # Liferay Lexicon-inspired color palette
     HEADER = '\033[94m'    # Light Blue for headers
     OKBLUE = '\033[1;94m'   # Bold Light Blue for branding elements
     OKCYAN = '\033[96m'    # Cyan for informational text
@@ -2870,7 +2869,7 @@ class TeardownRunner:
         print("║" + "  • Kubernetes applications (n8n, ingress-nginx)".ljust(59) + "║")
         print("║" + "  • EKS cluster and node groups".ljust(59) + "║")
         print("║" + "  • RDS PostgreSQL database (if exists)".ljust(59) + "║")
-        print("║" + "  • VPC, subnets, NAT gateways, Elastic IPs".ljust(59) + "║")
+        print("║" + "  • VPC, subnets, NAT gateways with Elastic IPs".ljust(59) + "║")
         print("║" + "  • IAM roles and policies".ljust(59) + "║")
         print("║" + "  • SSM parameters and Secrets Manager secrets".ljust(59) + "║")
         print("║" + " " * 58 + "║")

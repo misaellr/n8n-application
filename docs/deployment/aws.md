@@ -4,11 +4,30 @@
 - Terraform provisions a dedicated VPC (three public and three private subnets), Internet/NAT gateways, an Amazon EKS 1.29 control plane, and a managed node group sized by `node_*` variables.
 - AWS IAM roles are created for the control plane, worker nodes, and the AWS EBS CSI driver; the driver is enabled with a default `ebs-gp3` StorageClass.
 - Sensitive settings (the n8n encryption key, database credentials, basic auth credentials) are stored in AWS Systems Manager Parameter Store and AWS Secrets Manager, then injected into Kubernetes Secrets at deploy time.
-- Terraform installs the upstream `ingress-nginx` chart (Network Load Balancer with static Elastic IPs by default) but **does NOT deploy n8n**. The n8n application is deployed separately via Helm CLI by `setup.py` after infrastructure is ready.
+- Terraform installs the upstream `ingress-nginx` chart (Network Load Balancer with AWS-managed Elastic IPs) but **does NOT deploy n8n**. The n8n application is deployed separately via Helm CLI by `setup.py` after infrastructure is ready.
 - Database backend can be SQLite (default, file-based) or PostgreSQL (RDS). The CLI prompts for database selection and provisions RDS resources if PostgreSQL is chosen.
 - TLS/HTTPS configuration is handled as a **post-deployment step** after the LoadBalancer is provisioned and DNS can be configured. This prevents race conditions with Let's Encrypt validation.
 - Basic authentication can be configured post-deployment to protect access to n8n with auto-generated credentials (stored in AWS Secrets Manager).
 - The interactive CLI (`python3 setup.py`) orchestrates a **4-phase deployment**: (1) Terraform infrastructure, (2) n8n application via Helm, (3) LoadBalancer retrieval, (4) optional TLS & Basic Auth configuration.
+
+## Resource Management
+
+This deployment uses a mix of Terraform-managed and AWS-managed resources:
+
+| **Resource** | **Management** | **Details** |
+|-------------|----------------|-------------|
+| VPC, Subnets, Route Tables | Terraform | Fully managed in Terraform state |
+| NAT Gateway Elastic IPs | Terraform | 1 EIP allocated by Terraform (configurable via `nat_gateway_count`) |
+| Network Load Balancer | AWS (via K8s) | Created by ingress-nginx Helm chart with K8s LoadBalancer service |
+| NLB Elastic IPs | AWS-managed | Automatically allocated by AWS across AZs (not in Terraform state) |
+| EKS Cluster & Node Groups | Terraform | Fully managed in Terraform state |
+| cert-manager & Let's Encrypt | Kubernetes | Deployed via Helm, certificates managed by cert-manager |
+| RDS PostgreSQL (optional) | Terraform | Provisioned when `database_type = "postgresql"` |
+
+**Key Implications:**
+- **NLB IP Changes**: If the NLB is recreated, AWS may assign different IPs. For static IPs, you would need to preallocate EIPs via Terraform and associate them with the NLB.
+- **DNS Configuration**: Use the NLB hostname (e.g., `a1234.elb.us-west-1.amazonaws.com`) as a CNAME, or resolve it to IPs for A-records.
+- **Cost Control**: Default configuration uses 1 NAT gateway (vs 3) and limits NLB to 2 AZs to optimize costs while maintaining availability.
 
 ## Prerequisites
 - macOS or Linux workstation with `python3`, Terraform >= 1.6, AWS CLI >= 2.0, kubectl, and Helm >= 3. The CLI verifies these before continuing.
@@ -36,7 +55,7 @@ The setup CLI performs a **4-phase deployment** to avoid race conditions with TL
 5. Terraform provisions:
    - VPC, subnets, NAT gateways, Internet Gateway
    - EKS cluster and managed node group
-   - NGINX ingress controller (creates Network Load Balancer with static Elastic IPs)
+   - NGINX ingress controller (creates Network Load Balancer with AWS-managed Elastic IPs)
    - EBS CSI driver and default StorageClass
    - SSM Parameter for encryption key
    - **If PostgreSQL selected**: RDS instance, database security group, credentials in Secrets Manager
@@ -66,13 +85,12 @@ The setup CLI performs a **4-phase deployment** to avoid race conditions with TL
     kubectl get svc -n ingress-nginx ingress-nginx-controller \
       -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
     ```
-12. Once ready, the LoadBalancer URL and **static Elastic IPs** are displayed:
+12. Once ready, the LoadBalancer URL is displayed:
     ```
     LoadBalancer URL:  a1234567890.us-east-1.elb.amazonaws.com
-    Static Elastic IPs: 52.1.2.3, 52.1.2.4, 52.1.2.5
     Access n8n at:     http://a1234567890.us-east-1.elb.amazonaws.com
     ```
-    The static IPs allow for consistent DNS A-record mapping.
+    The NLB hostname resolves to AWS-managed Elastic IPs. You can query the IPs using `dig` or `nslookup` for DNS A-record configuration.
 
 ### Phase 4: TLS Configuration (Optional, ~5 minutes)
 10. The CLI prompts: **"Would you like to configure TLS/HTTPS now?"**
@@ -262,8 +280,9 @@ helm upgrade n8n ./helm -n n8n \
   - `cluster_name` defaults to `n8n-eks-cluster`, Kubernetes version `1.29`.
   - Worker capacity is controlled via `node_instance_types`, `node_desired_size`, `node_min_size`, and `node_max_size`.
 - **Ingress & TLS**
-  - `enable_nginx_ingress` installs `ingress-nginx` backed by an AWS Network Load Balancer with static Elastic IPs.
-  - When enabled, static Elastic IPs are allocated and attached to the NLB for consistent DNS A-record mapping.
+  - `enable_nginx_ingress` installs `ingress-nginx` backed by an AWS Network Load Balancer.
+  - When enabled, AWS automatically allocates and manages Elastic IPs for the NLB across availability zones.
+  - The NLB hostname can be resolved to IP addresses for DNS A-record configuration (IPs are AWS-managed, not Terraform-managed).
   - TLS configuration is **not handled by Terraform**. The n8n application is initially deployed with HTTP only.
   - TLS is configured post-deployment via `setup.py` (Phase 4) or manually using Helm upgrade commands.
   - `n8n_ingress_annotations` can be extended (for example, ALB annotations) through `terraform.tfvars`.
@@ -377,19 +396,24 @@ kubectl logs -f deployment/n8n -n n8n
 **Baseline monthly estimate in `us-east-1`:**
 - EKS control plane: ~$73
 - One `t3.medium` worker node: ~$30
-- Three NAT gateways: ~$98
-- Network Load Balancer: ~$16
-- Three static Elastic IPs: ~$11
+- One NAT gateway (default config): ~$33
+- One Elastic IP for NAT gateway: ~$3.60
+- Network Load Balancer with AWS-managed EIPs: ~$16
 - gp3 volume (10GB): ~$1
-- **SQLite deployment total: ~$229/month**
-- **PostgreSQL deployment (db.t3.micro): ~$244/month** (add ~$15/month for RDS)
-- **PostgreSQL deployment (db.t3.small): ~$259/month** (add ~$30/month for RDS)
+- **SQLite deployment total: ~$157/month**
+- **PostgreSQL deployment (db.t3.micro): ~$172/month** (add ~$15/month for RDS)
+- **PostgreSQL deployment (db.t3.small): ~$187/month** (add ~$30/month for RDS)
+
+**Notes on resource management:**
+- **NAT Gateway EIPs**: Managed by Terraform (1 EIP allocated for cost efficiency)
+- **NLB EIPs**: Managed by AWS automatically (included in NLB pricing, no separate charge)
+- Default configuration uses 1 NAT gateway and limits NLB to 2 availability zones for cost control
 
 **Cost optimization strategies:**
-- Reduce AZ count (fewer NAT gateways and Elastic IPs)
 - Use smaller instance types (t3.small for nodes)
 - Single-AZ RDS (not recommended for production)
 - Consider AWS VPC endpoints to reduce NAT gateway data transfer costs
+- Default configuration already optimized with 1 NAT gateway (vs 3) to minimize EIP costs
 
 **Scaling options:**
 - Increase `node_max_size` for horizontal node scaling

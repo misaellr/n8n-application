@@ -55,8 +55,8 @@ output "nginx_ingress_controller_endpoint" {
 }
 
 output "nlb_elastic_ips" {
-  value       = var.enable_nginx_ingress ? aws_eip.nlb[*].public_ip : []
-  description = "Static Elastic IPs attached to the Network Load Balancer"
+  value       = var.enable_nginx_ingress ? "EIPs are auto-managed by AWS NLB service. Get IPs via: kubectl get svc -n ingress-nginx ingress-nginx-controller" : "NGINX Ingress Controller not enabled"
+  description = "Network Load Balancer uses AWS-managed Elastic IPs (prevents orphaned resources)"
 }
 
 output "configure_kubectl" {

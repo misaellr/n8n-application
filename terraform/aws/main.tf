@@ -60,10 +60,11 @@ provider "helm" {
 locals {
   project_tag = var.project_tag
   azs         = slice(data.aws_availability_zones.available.names, 0, min(3, length(data.aws_availability_zones.available.names)))
-  # Use only 1 NAT gateway (in first AZ) to save on EIP usage
+  # Use only 1 NAT gateway (in first AZ) to save on Terraform-managed EIP usage
   nat_gateway_count = 1
-  # Use only 2 NLB EIPs (due to EIP limit) even though we have 3 AZs
-  nlb_eip_count = 2
+  # Limit NLB to 2 AZs/subnets for cost control and to manage AWS resource limits
+  # Note: AWS automatically allocates and manages EIPs for the NLB (not Terraform-managed)
+  nlb_az_count = 2
 }
 
 # Generate encryption key if not provided
@@ -551,20 +552,8 @@ data "aws_ssm_parameter" "n8n_encryption_key" {
 }
 
 ########################################
-# Elastic IPs for NLB (Static IP addresses)
-########################################
-resource "aws_eip" "nlb" {
-  count  = var.enable_nginx_ingress ? local.nlb_eip_count : 0
-  domain = "vpc"
-
-  tags = {
-    Name    = "${local.project_tag}-nlb-eip-${local.azs[count.index]}"
-    Project = local.project_tag
-  }
-}
-
-########################################
 # NGINX Ingress Controller (optional)
+# Note: NLB will create and manage its own EIPs automatically
 ########################################
 resource "helm_release" "nginx_ingress" {
   count = var.enable_nginx_ingress ? 1 : 0
@@ -579,15 +568,13 @@ resource "helm_release" "nginx_ingress" {
 
   values = [
     templatefile("${path.module}/nginx-ingress-values.tpl", {
-      nlb_eips    = join(",", slice(aws_eip.nlb[*].id, 0, local.nlb_eip_count))
-      nlb_subnets = join(",", slice(aws_subnet.public[*].id, 0, local.nlb_eip_count))
+      nlb_subnets = join(",", slice(aws_subnet.public[*].id, 0, local.nlb_az_count))
     })
   ]
 
   depends_on = [
     aws_eks_node_group.main,
     aws_eks_addon.ebs_csi,
-    aws_eip.nlb,
   ]
 }
 

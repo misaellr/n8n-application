@@ -99,15 +99,19 @@ See [configuration-history.md](docs/guides/configuration-history.md) for details
 - VPC with public/private subnets across 3 AZs
 - EKS cluster with managed node group
 - RDS PostgreSQL or SQLite
-- Network Load Balancer with Elastic IPs
+- Network Load Balancer with AWS-managed Elastic IPs
+- NAT Gateway with Terraform-managed Elastic IP (1 EIP for cost efficiency)
 - Secrets in AWS Parameter Store/Secrets Manager
+- Default: 1 NAT gateway, NLB limited to 2 AZs for cost optimization
 
 ### Azure AKS
 - VNet with public/private subnets across 3 zones
 - AKS cluster with managed node pool
 - Azure Database for PostgreSQL or SQLite
-- Azure Load Balancer with Public IP
+- Azure Load Balancer with configurable Public IP (static or dynamic)
+- NAT Gateway with Terraform-managed Public IP
 - Secrets in Azure Key Vault
+- Supports both Terraform-managed static IPs and Azure-assigned dynamic IPs
 
 ## Security
 

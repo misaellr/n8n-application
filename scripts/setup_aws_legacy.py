@@ -19,7 +19,6 @@ import signal
 
 # ANSI color codes
 class Colors:
-    # Liferay Lexicon-inspired color palette
     HEADER = '\033[94m'    # Light Blue for headers
     OKBLUE = '\033[1;94m'   # Bold Light Blue for branding elements
     OKCYAN = '\033[96m'    # Cyan for informational text
