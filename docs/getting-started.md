@@ -89,9 +89,10 @@ python setup.py --teardown
 
 ## Troubleshooting
 
-### Azure Permission Issues
+### Permission Issues
 
-If deployment fails with authorization errors, see [azure-permissions.md](guides/azure-permissions.md).
+- **AWS**: See [aws-permissions.md](guides/aws-permissions.md)
+- **Azure**: See [azure-permissions.md](guides/azure-permissions.md)
 
 ### Terraform State Issues
 
