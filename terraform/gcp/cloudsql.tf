@@ -99,16 +99,19 @@ resource "google_compute_global_address" "private_ip_address" {
 }
 
 # Create private VPC connection for Cloud SQL
-# NOTE: This must be deleted AFTER Cloud SQL instance is fully removed
-# If destroy fails with "Producer services still using this connection",
-# manually delete Cloud SQL first: gcloud sql instances delete <instance-name>
+# KNOWN ISSUE: Terraform Google Provider 5.x has a bug where service networking
+# connections fail to delete even when Cloud SQL is fully removed.
+# GitHub Issues: #16275, #19908, #3979, #4440
+# Workaround: Use deletion_policy = "ABANDON" (recommended by community)
+# GCP automatically cleans up the connection when the VPC is deleted.
 resource "google_service_networking_connection" "private_vpc_connection" {
   count                   = var.database_type == "cloudsql" ? 1 : 0
   network                 = google_compute_network.vpc.id
   service                 = "servicenetworking.googleapis.com"
   reserved_peering_ranges = [google_compute_global_address.private_ip_address[0].name]
 
-  deletion_policy         = "ABANDON"  # Don't fail destroy if connection still in use
+  # ABANDON allows terraform destroy to succeed; GCP cleans up connection automatically
+  deletion_policy         = "ABANDON"
 
   depends_on = [google_compute_global_address.private_ip_address]
 }
