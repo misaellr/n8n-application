@@ -3955,6 +3955,48 @@ def deploy_gcp_terraform(config: GCPDeploymentConfig, terraform_dir: Path) -> bo
     if not success:
         print(f"{Colors.FAIL}✗ Terraform plan failed{Colors.ENDC}")
         print(output)
+
+        # Check for common GCP authentication errors and provide helpful guidance
+        if "application default credentials" in output.lower() or "adc" in output.lower():
+            print(f"\n{Colors.WARNING}{'=' * 60}{Colors.ENDC}")
+            print(f"{Colors.WARNING}{Colors.BOLD}⚠️  GCP AUTHENTICATION ERROR{Colors.ENDC}")
+            print(f"\n{Colors.BOLD}To fix this, run:{Colors.ENDC}")
+            print(f"  {Colors.OKCYAN}gcloud auth application-default login{Colors.ENDC}")
+            print(f"\n{Colors.BOLD}Why this is needed:{Colors.ENDC}")
+            print(f"  • {Colors.OKCYAN}gcloud auth login{Colors.ENDC} - Authenticates YOU for gcloud CLI commands")
+            print(f"  • {Colors.OKCYAN}gcloud auth application-default login{Colors.ENDC} - Authenticates Terraform and other tools")
+            print(f"\n{Colors.BOLD}Both commands are required for full GCP functionality.{Colors.ENDC}")
+            print(f"{Colors.WARNING}{'=' * 60}{Colors.ENDC}\n")
+
+        # Check for API not enabled errors
+        elif "googleapi: error 403" in output.lower() or "api has not been enabled" in output.lower():
+            print(f"\n{Colors.WARNING}{'=' * 60}{Colors.ENDC}")
+            print(f"{Colors.WARNING}{Colors.BOLD}⚠️  GCP API NOT ENABLED{Colors.ENDC}")
+            print(f"\n{Colors.BOLD}One or more required GCP APIs are not enabled.{Colors.ENDC}")
+            print(f"\n{Colors.BOLD}To fix this, enable the required APIs:{Colors.ENDC}")
+            print(f"  {Colors.OKCYAN}gcloud services enable container.googleapis.com{Colors.ENDC}")
+            print(f"  {Colors.OKCYAN}gcloud services enable compute.googleapis.com{Colors.ENDC}")
+            print(f"  {Colors.OKCYAN}gcloud services enable servicenetworking.googleapis.com{Colors.ENDC}")
+            print(f"  {Colors.OKCYAN}gcloud services enable secretmanager.googleapis.com{Colors.ENDC}")
+            print(f"  {Colors.OKCYAN}gcloud services enable sqladmin.googleapis.com{Colors.ENDC}")
+            print(f"\n{Colors.BOLD}Or enable all at once:{Colors.ENDC}")
+            print(f"  {Colors.OKCYAN}gcloud services enable container.googleapis.com compute.googleapis.com servicenetworking.googleapis.com secretmanager.googleapis.com sqladmin.googleapis.com --project={config.gcp_project_id}{Colors.ENDC}")
+            print(f"{Colors.WARNING}{'=' * 60}{Colors.ENDC}\n")
+
+        # Check for quota errors
+        elif "quota" in output.lower() and ("exceeded" in output.lower() or "limit" in output.lower()):
+            print(f"\n{Colors.WARNING}{'=' * 60}{Colors.ENDC}")
+            print(f"{Colors.WARNING}{Colors.BOLD}⚠️  GCP QUOTA EXCEEDED{Colors.ENDC}")
+            print(f"\n{Colors.BOLD}Your GCP project has exceeded resource quotas.{Colors.ENDC}")
+            print(f"\n{Colors.BOLD}Possible solutions:{Colors.ENDC}")
+            print(f"  1. Check your project quotas:")
+            print(f"     {Colors.OKCYAN}gcloud compute project-info describe --project={config.gcp_project_id}{Colors.ENDC}")
+            print(f"  2. Request a quota increase in the GCP Console:")
+            print(f"     {Colors.OKCYAN}https://console.cloud.google.com/iam-admin/quotas{Colors.ENDC}")
+            print(f"  3. Try a different region with available capacity")
+            print(f"  4. Clean up unused resources in your project")
+            print(f"{Colors.WARNING}{'=' * 60}{Colors.ENDC}\n")
+
         return False
 
     # Show plan summary
