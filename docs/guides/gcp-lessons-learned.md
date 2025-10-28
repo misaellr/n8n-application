@@ -247,6 +247,7 @@ gke-gcloud-auth-plugin --version
 - [GKE kubectl authentication](https://cloud.google.com/kubernetes-engine/docs/how-to/cluster-access-for-kubectl)
 - [gke-gcloud-auth-plugin installation](https://cloud.google.com/kubernetes-engine/docs/how-to/cluster-access-for-kubectl#install_plugin)
 - [Kubernetes 1.25 release notes](https://kubernetes.io/blog/2022/08/04/kubernetes-v1-25-release/#removal-of-the-legacy-gcp-and-azure-auth-plugins) (deprecated built-in cloud auth)
+- **[gcp-skip-terraform-lessons.md](./gcp-skip-terraform-lessons.md)** - Skip-terraform mode deployment issues (6 issues resolved)
 
 ---
 
@@ -254,12 +255,13 @@ gke-gcloud-auth-plugin --version
 
 - [ ] Update setup.py with dependency check (DependencyChecker class)
 - [ ] Update setup.py with pre-deployment plugin verification
-- [ ] Update setup.py with kubectl context verification
+- [x] Update setup.py with kubectl context verification (commit 2f41c8c)
 - [ ] Update setup.py with better error messaging for gcloud failures
 - [ ] Add integration test for missing plugin scenario
 - [ ] Add gke-gcloud-auth-plugin check to CI/CD pipeline
 - [ ] Update getting-started.md with GCP-specific notes
 - [ ] Update troubleshooting guide with this common error
+- [x] Document skip-terraform mode issues (gcp-skip-terraform-lessons.md)
 
 ---
 
