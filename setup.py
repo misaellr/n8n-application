@@ -5107,84 +5107,84 @@ WORKFLOW:
                 # PHASE 1: Deploy Infrastructure (Terraform)
                 # ═══════════════════════════════════════════════════════════════
                 print(f"\n{Colors.HEADER}{Colors.BOLD}📦 PHASE 1: Deploying Infrastructure{Colors.ENDC}")
-            print("=" * 60)
-            print("This will create:")
-            print("  • VPC, subnets, NAT gateways (~5 minutes)")
-            print("  • EKS cluster and node group (~15-20 minutes)")
-            print("  • NGINX ingress controller with LoadBalancer (~2 minutes)")
-            print("  • EBS CSI driver and StorageClass")
-            print(f"\n{Colors.WARNING}⏱  Estimated time: ~22-27 minutes{Colors.ENDC}\n")
+                print("=" * 60)
+                print("This will create:")
+                print("  • VPC, subnets, NAT gateways (~5 minutes)")
+                print("  • EKS cluster and node group (~15-20 minutes)")
+                print("  • NGINX ingress controller with LoadBalancer (~2 minutes)")
+                print("  • EBS CSI driver and StorageClass")
+                print(f"\n{Colors.WARNING}⏱  Estimated time: ~22-27 minutes{Colors.ENDC}\n")
 
-            tf_runner = TerraformRunner(script_dir / "terraform" / "aws")
+                tf_runner = TerraformRunner(script_dir / "terraform" / "aws")
 
-            if not tf_runner.init():
-                raise Exception("Terraform initialization failed")
+                if not tf_runner.init():
+                    raise Exception("Terraform initialization failed")
 
-            # Run plan and display summary
-            plan_success, plan_output = tf_runner.plan(display_output=True)
-            if not plan_success:
-                raise Exception("Terraform plan failed")
+                # Run plan and display summary
+                plan_success, plan_output = tf_runner.plan(display_output=True)
+                if not plan_success:
+                    raise Exception("Terraform plan failed")
 
-            # Ask user to confirm before applying
-            prompt = ConfigurationPrompt()
-            if not prompt.prompt_yes_no("\nProceed with Terraform apply?", default=True):
-                raise SetupInterrupted("User cancelled Terraform apply")
+                # Ask user to confirm before applying
+                prompt = ConfigurationPrompt()
+                if not prompt.prompt_yes_no("\nProceed with Terraform apply?", default=True):
+                    raise SetupInterrupted("User cancelled Terraform apply")
 
-            # Save current state before applying (to preserve previous region's state)
-            print(f"\n{Colors.HEADER}💾 Saving current state before deployment...{Colors.ENDC}")
-            tfstate_path = script_dir / "terraform" / "aws" / "terraform.tfstate"
-            if tfstate_path.exists():
-                try:
-                    with open(tfstate_path, 'r') as f:
-                        existing_state = json.load(f)
-                        if existing_state.get('resources'):
-                            # Try to detect region from existing state
-                            existing_region = None
-                            for resource in existing_state.get('resources', []):
-                                if resource.get('type') == 'aws_eks_cluster':
-                                    instances = resource.get('instances', [])
-                                    if instances:
-                                        arn = instances[0].get('attributes', {}).get('arn', '')
-                                        if arn:
-                                            # ARN format: arn:aws:eks:REGION:...
-                                            existing_region = arn.split(':')[3] if len(arn.split(':')) > 3 else None
-                                            break
+                # Save current state before applying (to preserve previous region's state)
+                print(f"\n{Colors.HEADER}💾 Saving current state before deployment...{Colors.ENDC}")
+                tfstate_path = script_dir / "terraform" / "aws" / "terraform.tfstate"
+                if tfstate_path.exists():
+                    try:
+                        with open(tfstate_path, 'r') as f:
+                            existing_state = json.load(f)
+                            if existing_state.get('resources'):
+                                # Try to detect region from existing state
+                                existing_region = None
+                                for resource in existing_state.get('resources', []):
+                                    if resource.get('type') == 'aws_eks_cluster':
+                                        instances = resource.get('instances', [])
+                                        if instances:
+                                            arn = instances[0].get('attributes', {}).get('arn', '')
+                                            if arn:
+                                                # ARN format: arn:aws:eks:REGION:...
+                                                existing_region = arn.split(':')[3] if len(arn.split(':')) > 3 else None
+                                                break
 
-                            if existing_region:
-                                save_state_for_region(script_dir / "terraform" / "aws", existing_region)
-                            else:
-                                print(f"{Colors.OKCYAN}  Could not detect region from existing state, using timestamp backup{Colors.ENDC}")
-                                timestamp = int(time.time())
-                                backup_path = script_dir / "terraform" / "aws" / f"terraform.tfstate.{timestamp}.backup"
-                                shutil.copy2(tfstate_path, backup_path)
-                                print(f"{Colors.OKGREEN}✓ Saved current state to {backup_path.name}{Colors.ENDC}")
-                except Exception as e:
-                    print(f"{Colors.WARNING}⚠  Could not save existing state: {e}{Colors.ENDC}")
+                                if existing_region:
+                                    save_state_for_region(script_dir / "terraform" / "aws", existing_region)
+                                else:
+                                    print(f"{Colors.OKCYAN}  Could not detect region from existing state, using timestamp backup{Colors.ENDC}")
+                                    timestamp = int(time.time())
+                                    backup_path = script_dir / "terraform" / "aws" / f"terraform.tfstate.{timestamp}.backup"
+                                    shutil.copy2(tfstate_path, backup_path)
+                                    print(f"{Colors.OKGREEN}✓ Saved current state to {backup_path.name}{Colors.ENDC}")
+                    except Exception as e:
+                        print(f"{Colors.WARNING}⚠  Could not save existing state: {e}{Colors.ENDC}")
 
-            if not tf_runner.apply():
-                raise Exception("Terraform apply failed")
+                if not tf_runner.apply():
+                    raise Exception("Terraform apply failed")
 
-            print(f"\n{Colors.OKGREEN}✓ Infrastructure deployed successfully{Colors.ENDC}")
+                print(f"\n{Colors.OKGREEN}✓ Infrastructure deployed successfully{Colors.ENDC}")
 
-            # Save newly created state with region name
-            print(f"\n{Colors.HEADER}💾 Saving state for region {config.aws_region}...{Colors.ENDC}")
-            save_state_for_region(script_dir / "terraform" / "aws", config.aws_region)
+                # Save newly created state with region name
+                print(f"\n{Colors.HEADER}💾 Saving state for region {config.aws_region}...{Colors.ENDC}")
+                save_state_for_region(script_dir / "terraform" / "aws", config.aws_region)
 
-            # Get outputs
-            outputs = tf_runner.get_outputs()
+                # Get outputs
+                outputs = tf_runner.get_outputs()
 
-            # Configure kubectl
-            if 'configure_kubectl' in outputs:
-                print(f"\n{Colors.HEADER}🔧 Configuring kubectl...{Colors.ENDC}")
-                kubectl_cmd = outputs['configure_kubectl']
-                result = subprocess.run(kubectl_cmd, shell=True, capture_output=True, text=True)
+                # Configure kubectl
+                if 'configure_kubectl' in outputs:
+                    print(f"\n{Colors.HEADER}🔧 Configuring kubectl...{Colors.ENDC}")
+                    kubectl_cmd = outputs['configure_kubectl']
+                    result = subprocess.run(kubectl_cmd, shell=True, capture_output=True, text=True)
 
-                if result.returncode == 0:
-                    print(f"{Colors.OKGREEN}✓ kubectl configured{Colors.ENDC}")
-                else:
-                    print(f"{Colors.WARNING}⚠  kubectl configuration failed. Run manually:{Colors.ENDC}")
-                    print(f"  {Colors.OKCYAN}{kubectl_cmd}{Colors.ENDC}")
-                    raise Exception("kubectl configuration required")
+                    if result.returncode == 0:
+                        print(f"{Colors.OKGREEN}✓ kubectl configured{Colors.ENDC}")
+                    else:
+                        print(f"{Colors.WARNING}⚠  kubectl configuration failed. Run manually:{Colors.ENDC}")
+                        print(f"  {Colors.OKCYAN}{kubectl_cmd}{Colors.ENDC}")
+                        raise Exception("kubectl configuration required")
 
         # ═══════════════════════════════════════════════════════════════
         # PHASE 2: Deploy n8n Application (Helm)
