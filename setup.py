@@ -707,6 +707,130 @@ class AWSAuthChecker:
         except Exception as e:
             return False, str(e)
 
+class GCPAuthChecker:
+    """Handles GCP authentication verification"""
+
+    @staticmethod
+    def list_projects() -> list:
+        """Get list of accessible GCP projects"""
+        try:
+            result = subprocess.run(
+                ['gcloud', 'projects', 'list', '--format=json'],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode == 0:
+                projects = json.loads(result.stdout)
+                return [{'projectId': p['projectId'], 'name': p.get('name', p['projectId'])}
+                        for p in projects]
+            return []
+        except subprocess.TimeoutExpired:
+            return []
+        except Exception:
+            return []
+
+    @staticmethod
+    def verify_credentials(project_id: str) -> Tuple[bool, str]:
+        """Verify GCP credentials work for specified project
+
+        Args:
+            project_id: GCP project ID to verify access
+
+        Returns:
+            Tuple of (success: bool, message: str)
+        """
+        try:
+            # First check if user is authenticated
+            auth_result = subprocess.run(
+                ['gcloud', 'auth', 'list', '--format=json'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            if auth_result.returncode != 0:
+                return False, "Not authenticated with gcloud. Run: gcloud auth login"
+
+            auth_accounts = json.loads(auth_result.stdout)
+            active_accounts = [a for a in auth_accounts if a.get('status') == 'ACTIVE']
+
+            if not active_accounts:
+                return False, "No active gcloud authentication. Run: gcloud auth login"
+
+            active_email = active_accounts[0].get('account', 'unknown')
+
+            # Verify access to specified project
+            project_result = subprocess.run(
+                ['gcloud', 'projects', 'describe', project_id, '--format=json'],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if project_result.returncode == 0:
+                project_info = json.loads(project_result.stdout)
+                project_name = project_info.get('name', project_id)
+                return True, f"Authenticated as {active_email}, Project: {project_name}"
+            else:
+                return False, f"Cannot access project '{project_id}'. Check permissions or project ID."
+
+        except subprocess.TimeoutExpired:
+            return False, "GCP authentication check timed out"
+        except json.JSONDecodeError:
+            return False, "Failed to parse gcloud output"
+        except Exception as e:
+            return False, f"Authentication check failed: {str(e)}"
+
+    @staticmethod
+    def check_required_apis(project_id: str) -> Tuple[bool, list]:
+        """Check if required GCP APIs are enabled
+
+        Args:
+            project_id: GCP project ID
+
+        Returns:
+            Tuple of (all_enabled: bool, missing_apis: list)
+        """
+        required_apis = [
+            'compute.googleapis.com',
+            'container.googleapis.com',
+            'cloudresourcemanager.googleapis.com',
+            'iam.googleapis.com',
+            'iamcredentials.googleapis.com',
+            'secretmanager.googleapis.com',
+            'sqladmin.googleapis.com',
+            'servicenetworking.googleapis.com',
+            'logging.googleapis.com',
+            'monitoring.googleapis.com',
+        ]
+
+        try:
+            result = subprocess.run(
+                ['gcloud', 'services', 'list', '--enabled',
+                 f'--project={project_id}', '--format=json'],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode != 0:
+                return False, required_apis
+
+            enabled_services = json.loads(result.stdout)
+            enabled_api_names = {svc.get('config', {}).get('name', '') for svc in enabled_services}
+
+            missing = [api for api in required_apis if api not in enabled_api_names]
+
+            return (len(missing) == 0, missing)
+
+        except subprocess.TimeoutExpired:
+            return False, required_apis
+        except json.JSONDecodeError:
+            return False, required_apis
+        except Exception:
+            return False, required_apis
+
 class ConfigurationPrompt:
     """Handles interactive configuration prompts"""
 
