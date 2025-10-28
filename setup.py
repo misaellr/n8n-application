@@ -103,11 +103,11 @@ class ConfigHistoryManager:
 
         # Group configuration by category
         categories = {
-            'Cloud & Infrastructure': ['cloud_provider', 'aws_region', 'aws_profile', 'azure_subscription_id', 'azure_location', 'resource_group_name'],
-            'Cluster': ['cluster_name', 'kubernetes_version', 'node_vm_size', 'node_instance_types', 'node_count', 'node_desired_size', 'node_min_size', 'node_max_size', 'node_min_count', 'node_max_count', 'enable_auto_scaling'],
+            'Cloud & Infrastructure': ['cloud_provider', 'aws_region', 'aws_profile', 'azure_subscription_id', 'azure_location', 'resource_group_name', 'gcp_project_id', 'gcp_region', 'gcp_zone', 'vpc_name', 'subnet_name'],
+            'Cluster': ['cluster_name', 'kubernetes_version', 'node_vm_size', 'node_instance_types', 'node_count', 'node_desired_size', 'node_min_size', 'node_max_size', 'node_min_count', 'node_max_count', 'enable_auto_scaling', 'node_machine_type'],
             'Application': ['n8n_host', 'n8n_namespace', 'n8n_protocol', 'n8n_persistence_size', 'timezone', 'n8n_encryption_key'],
-            'Database': ['database_type', 'rds_instance_class', 'rds_allocated_storage', 'rds_multi_az', 'postgres_sku', 'postgres_storage_gb', 'postgres_high_availability'],
-            'Networking & Security': ['use_static_ip', 'enable_nginx_ingress', 'enable_basic_auth', 'basic_auth_username', 'enable_cert_manager', 'tls_certificate_source', 'letsencrypt_email'],
+            'Database': ['database_type', 'rds_instance_class', 'rds_allocated_storage', 'rds_multi_az', 'postgres_sku', 'postgres_storage_gb', 'postgres_high_availability', 'cloudsql_instance_name', 'cloudsql_tier'],
+            'Networking & Security': ['use_static_ip', 'enable_nginx_ingress', 'enable_basic_auth', 'basic_auth_username', 'enable_cert_manager', 'tls_certificate_source', 'letsencrypt_email', 'enable_tls', 'tls_provider'],
             'Permissions': ['terraform_manage_role_assignments']
         }
 
