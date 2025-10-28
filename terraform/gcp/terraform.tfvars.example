@@ -1,0 +1,149 @@
+# ============================================================
+# GCP n8n Terraform Configuration Example
+# ============================================================
+# Copy this file to terraform.tfvars and fill in your values:
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# IMPORTANT: terraform.tfvars is ignored by git to protect secrets
+
+# ============================================================
+# Required Variables
+# ============================================================
+
+# GCP project ID (find with: gcloud projects list)
+gcp_project_id = "my-gcp-project-id"
+
+# GCP region for deployment
+# Recommended: us-central1, us-east1, europe-west1
+gcp_region = "us-central1"
+
+# N8N encryption key (required - 64 hexadecimal characters)
+# Generate with: openssl rand -hex 32
+# KEEP THIS SECRET - used to encrypt n8n data at rest
+n8n_encryption_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+# ============================================================
+# Cluster Configuration
+# ============================================================
+
+# Name for the GKE cluster and related resources
+cluster_name = "n8n-gke"
+
+# VPC network name
+vpc_name = "n8n-vpc"
+
+# Subnet name
+subnet_name = "n8n-private-subnet"
+
+# Number of nodes in the node pool (1-10 recommended for cost control)
+node_count = 2
+
+# Node machine type
+# Cost-effective: e2-small, e2-medium
+# Production: n2-standard-2, n2-standard-4
+# See: https://cloud.google.com/compute/docs/machine-types
+node_machine_type = "e2-medium"
+
+# ============================================================
+# Database Configuration
+# ============================================================
+
+# Database type: "sqlite" or "cloudsql"
+# sqlite: Embedded database (simpler, lower cost, sufficient for small workloads)
+# cloudsql: Managed PostgreSQL (production, HA, backups, higher cost)
+database_type = "sqlite"
+
+# ============================================================
+# Cloud SQL Configuration (only used if database_type = "cloudsql")
+# ============================================================
+
+# Cloud SQL machine tier
+# Development: db-f1-micro (shared CPU, lowest cost)
+# Production: db-n1-standard-1, db-n1-standard-2
+cloudsql_tier = "db-f1-micro"
+
+# Cloud SQL availability
+# ZONAL: Single zone (lower cost)
+# REGIONAL: Multi-zone high availability (higher cost)
+cloudsql_availability_type = "ZONAL"
+
+# PostgreSQL version
+cloudsql_database_version = "POSTGRES_15"
+
+# Disk size in GB (auto-resizes if needed)
+cloudsql_disk_size = 10
+
+# Database credentials
+cloudsql_username = "n8n"
+
+# Cloud SQL password (required if database_type = "cloudsql")
+# Generate with: openssl rand -base64 24
+cloudsql_password = "change-this-secure-password"
+
+# ============================================================
+# Security Configuration
+# ============================================================
+
+# Enable HTTP basic authentication for n8n UI
+enable_basic_auth = false
+
+# Basic auth credentials (only used if enable_basic_auth = true)
+basic_auth_username = "admin"
+basic_auth_password = "change-this-password"
+
+# ============================================================
+# Kubernetes Configuration
+# ============================================================
+
+# Kubernetes namespace for n8n deployment
+n8n_namespace = "n8n"
+
+# ============================================================
+# Resource Labels
+# ============================================================
+
+# Custom labels to apply to all resources (optional)
+labels = {
+  managed_by  = "terraform"
+  application = "n8n"
+  environment = "production"
+  team        = "platform"
+}
+
+# ============================================================
+# Advanced Configuration (Optional)
+# ============================================================
+
+# Specific GCP zone (leave empty to auto-select based on region)
+# gcp_zone = "us-central1-a"
+
+# ============================================================
+# Cost Estimation
+# ============================================================
+# Estimated monthly costs (us-central1, as of 2024):
+#
+# Configuration 1 - Development (SQLite):
+#   - GKE cluster: $74.40 (cluster management fee)
+#   - 2x e2-medium nodes: ~$48.90
+#   - Cloud NAT: ~$45
+#   Total: ~$168/month
+#
+# Configuration 2 - Production (Cloud SQL):
+#   - GKE cluster: $74.40
+#   - 2x n2-standard-2 nodes: ~$154
+#   - Cloud SQL db-n1-standard-1 (ZONAL): ~$51
+#   - Cloud NAT: ~$45
+#   Total: ~$324/month
+#
+# Configuration 3 - Production HA (Cloud SQL Regional):
+#   - GKE cluster: $74.40
+#   - 3x n2-standard-2 nodes: ~$231
+#   - Cloud SQL db-n1-standard-2 (REGIONAL): ~$228
+#   - Cloud NAT: ~$45
+#   Total: ~$578/month
+#
+# Notes:
+# - Costs vary by region
+# - Does not include egress, load balancer, or storage costs
+# - Cloud SQL includes automated backups and point-in-time recovery
+# - For latest pricing: https://cloud.google.com/products/calculator
