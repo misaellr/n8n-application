@@ -7,6 +7,38 @@ locals {
   # Use 3 availability zones (Azure typically has 3 zones per region)
   availability_zones = ["1", "2", "3"]
 
+  # Regions that support PostgreSQL Flexible Server availability zones
+  # Source: https://learn.microsoft.com/en-us/azure/reliability/availability-zones-service-support
+  postgres_zone_supported_regions = [
+    "eastus", "eastus2", "westus2", "westus3",
+    "centralus", "northcentralus", "southcentralus",
+    "canadacentral", "canadaeast",
+    "brazilsouth",
+    "northeurope", "westeurope",
+    "uksouth", "ukwest",
+    "francecentral",
+    "germanywestcentral",
+    "norwayeast",
+    "switzerlandnorth",
+    "swedencentral",
+    "australiaeast",
+    "japaneast",
+    "koreacentral",
+    "southeastasia",
+    "eastasia",
+    "southafricanorth",
+    "uaenorth",
+    "centralindia"
+  ]
+
+  # Smart zone selection for PostgreSQL
+  # Priority: user override > auto-detect based on region > null (let Azure decide)
+  postgres_zone = (
+    var.postgres_availability_zone != null ? var.postgres_availability_zone :
+    contains(local.postgres_zone_supported_regions, var.azure_location) && !var.postgres_high_availability ? "1" :
+    null
+  )
+
   common_tags = merge(
     {
       Project     = local.project_tag

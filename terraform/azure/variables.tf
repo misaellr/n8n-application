@@ -212,6 +212,12 @@ variable "postgres_backup_retention_days" {
   default     = 7
 }
 
+variable "postgres_availability_zone" {
+  description = "Availability zone for PostgreSQL (null for no zone, '1', '2', or '3' for specific zone). If null, Azure auto-selects based on region capabilities."
+  type        = string
+  default     = null
+}
+
 ########################################
 # Optional Features
 ########################################

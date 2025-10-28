@@ -19,7 +19,12 @@ resource "azurerm_postgresql_flexible_server" "main" {
   version                = var.postgres_version
   administrator_login    = var.postgres_username
   administrator_password = random_password.postgres_password[0].result
-  zone                   = var.postgres_high_availability ? null : "1"
+
+  # Smart zone selection based on region capabilities
+  # - If user sets postgres_availability_zone variable, use that
+  # - If region supports zones and HA is disabled, use zone "1"
+  # - Otherwise null (let Azure auto-place, required for regions without zone support)
+  zone = local.postgres_zone
 
   storage_mb   = var.postgres_storage_gb * 1024
   sku_name     = var.postgres_sku
