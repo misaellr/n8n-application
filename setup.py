@@ -330,6 +330,9 @@ class GCPDeploymentConfig:
         self.database_type: str = "sqlite"  # "sqlite" or "cloudsql"
         self.cloudsql_instance_name: str = ""
         self.cloudsql_tier: str = "db-f1-micro"
+        self.cloudsql_username: str = "n8n"
+        self.cloudsql_password: str = "CHANGE_ME_SECURELY"
+        self.cloudsql_database_name: str = "n8n"
 
         # Application settings
         self.n8n_namespace: str = "n8n"
@@ -365,6 +368,9 @@ class GCPDeploymentConfig:
             'database_type': self.database_type,
             'cloudsql_instance_name': self.cloudsql_instance_name,
             'cloudsql_tier': self.cloudsql_tier,
+            'cloudsql_username': self.cloudsql_username,
+            'cloudsql_password': self.cloudsql_password,
+            'cloudsql_database_name': self.cloudsql_database_name,
             'n8n_namespace': self.n8n_namespace,
             'n8n_host': self.n8n_host,
             'n8n_protocol': self.n8n_protocol,
@@ -2124,6 +2130,15 @@ def load_existing_configuration(script_dir: Path, cloud_provider: str = "aws"):
         elif key == 'cloudsql_tier':
             if hasattr(config, 'cloudsql_tier'):
                 config.cloudsql_tier = str(parsed)
+        elif key == 'cloudsql_username':
+            if hasattr(config, 'cloudsql_username'):
+                config.cloudsql_username = str(parsed)
+        elif key == 'cloudsql_password':
+            if hasattr(config, 'cloudsql_password'):
+                config.cloudsql_password = str(parsed)
+        elif key == 'cloudsql_database_name':
+            if hasattr(config, 'cloudsql_database_name'):
+                config.cloudsql_database_name = str(parsed)
 
     if not config.n8n_host:
         raise ValueError("n8n_host is missing in terraform.tfvars")
@@ -2424,8 +2439,9 @@ class HelmRunner:
             '--set', f'persistence.size={config.n8n_persistence_size}',
         ]
 
-        # Add database configuration if PostgreSQL is selected
-        if db_config and db_config.get('database_type') == 'postgresql':
+        # Add database configuration if PostgreSQL is selected (AWS RDS or GCP Cloud SQL)
+        if db_config and db_config.get('database_type') in ['postgresql', 'cloudsql']:
+            db_type = db_config.get('database_type')
             print(f"{Colors.OKCYAN}  Configuring PostgreSQL database connection...{Colors.ENDC}")
 
             # Create Kubernetes Secret for database credentials
@@ -2454,10 +2470,13 @@ class HelmRunner:
                 )
 
                 # Create new secret with database credentials
+                # Get password based on database type
+                db_password = db_config.get("cloudsql_password") if db_type == 'cloudsql' else db_config.get("rds_password", "")
+
                 result = subprocess.run([
                     'kubectl', 'create', 'secret', 'generic', 'n8n-db-credentials',
                     '-n', namespace,
-                    f'--from-literal=password={db_config.get("rds_password", "")}'
+                    f'--from-literal=password={db_password}'
                 ], capture_output=True, text=True)
 
                 if result.returncode != 0:
@@ -2470,14 +2489,26 @@ class HelmRunner:
                 print(f"{Colors.FAIL}✗ Error creating database secret: {e}{Colors.ENDC}")
                 return False
 
+            # Determine database host and credentials based on cloud provider
+            if db_type == 'cloudsql':
+                # GCP Cloud SQL
+                db_host = db_config.get("cloudsql_private_ip", "")
+                db_name = db_config.get("cloudsql_database_name", "n8n")
+                db_user = db_config.get("cloudsql_username", "")
+            else:
+                # AWS RDS
+                db_host = db_config.get("rds_address", "")
+                db_name = db_config.get("rds_database_name", "n8n")
+                db_user = db_config.get("rds_username", "")
+
             values_args.extend([
                 '--set', 'database.type=postgresql',
-                '--set', f'database.postgresql.host={db_config.get("rds_address", "")}',
+                '--set', f'database.postgresql.host={db_host}',
                 '--set', f'database.postgresql.port=5432',
-                '--set', f'database.postgresql.database={db_config.get("rds_database_name", "n8n")}',
-                '--set', f'database.postgresql.user={db_config.get("rds_username", "")}',
+                '--set', f'database.postgresql.database={db_name}',
+                '--set', f'database.postgresql.user={db_user}',
                 # Password will be read from secret, not passed here
-                # Enable SSL for RDS connections (required by AWS RDS)
+                # Enable SSL for database connections (required by AWS RDS and GCP Cloud SQL)
                 '--set', 'env.DB_POSTGRESDB_SSL_ENABLED=true',
                 '--set', 'env.DB_POSTGRESDB_SSL_REJECT_UNAUTHORIZED=false',
             ])
@@ -5136,6 +5167,7 @@ WORKFLOW:
             'cloudsql_database_name': outputs.get('cloudsql_database_name'),
             'cloudsql_username': outputs.get('cloudsql_username'),
             'cloudsql_private_ip': outputs.get('cloudsql_private_ip'),
+            'cloudsql_password': getattr(config, 'cloudsql_password', None),  # From tfvars, not in outputs
         }
 
         # Deploy n8n without TLS initially (but with database configuration)
