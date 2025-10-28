@@ -111,6 +111,9 @@ resource "google_container_cluster" "primary" {
     evaluation_mode = "DISABLED"
   }
 
+  # Deletion protection (set to false for development, true for production)
+  deletion_protection = false
+
   # Lifecycle configuration
   lifecycle {
     ignore_changes = [

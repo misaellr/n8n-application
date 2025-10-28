@@ -4691,6 +4691,36 @@ WORKFLOW:
 
                 # Execute teardown
                 print(f"\n{Colors.HEADER}🗑️  Destroying GCP resources...{Colors.ENDC}")
+
+                # Pre-destroy checks: Delete Kubernetes resources to close connections
+                print(f"\n{Colors.HEADER}Step 1: Cleaning up Kubernetes resources...{Colors.ENDC}")
+                try:
+                    # Delete n8n deployment to close database connections
+                    result = subprocess.run(
+                        ['kubectl', 'delete', 'deployment', 'n8n', '-n', config.n8n_namespace, '--ignore-not-found=true'],
+                        capture_output=True, text=True, timeout=60
+                    )
+                    if result.returncode == 0:
+                        print(f"{Colors.OKGREEN}  ✓ Deleted n8n deployment{Colors.ENDC}")
+
+                    # Delete entire namespace
+                    result = subprocess.run(
+                        ['kubectl', 'delete', 'namespace', config.n8n_namespace, '--ignore-not-found=true', '--timeout=2m'],
+                        capture_output=True, text=True, timeout=150
+                    )
+                    if result.returncode == 0:
+                        print(f"{Colors.OKGREEN}  ✓ Deleted namespace {config.n8n_namespace}{Colors.ENDC}")
+
+                    # Give time for connections to close
+                    print(f"{Colors.OKCYAN}  Waiting for database connections to close...{Colors.ENDC}")
+                    import time
+                    time.sleep(10)
+
+                except Exception as e:
+                    print(f"{Colors.WARNING}  ⚠  Kubernetes cleanup warning: {e}{Colors.ENDC}")
+                    print(f"{Colors.WARNING}  Continuing with Terraform destroy...{Colors.ENDC}")
+
+                print(f"\n{Colors.HEADER}Step 2: Destroying Terraform infrastructure...{Colors.ENDC}")
                 terraform_dir = script_dir / "terraform" / "gcp"
                 tf_runner = TerraformRunner(terraform_dir)
 
