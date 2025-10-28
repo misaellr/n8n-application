@@ -2378,6 +2378,20 @@ class TerraformRunner:
 
         return {}
 
+    def destroy(self) -> bool:
+        """Destroy Terraform-managed infrastructure"""
+        print(f"\n{Colors.HEADER}💣 Destroying Terraform infrastructure...{Colors.ENDC}")
+        print(f"{Colors.WARNING}This will destroy all resources managed by Terraform.{Colors.ENDC}")
+
+        success, _ = self.run_command(['destroy'], interactive=True)
+
+        if success:
+            print(f"\n{Colors.OKGREEN}✓ Terraform destroy completed{Colors.ENDC}")
+        else:
+            print(f"\n{Colors.FAIL}✗ Terraform destroy failed{Colors.ENDC}")
+
+        return success
+
 class HelmRunner:
     """Handles Helm execution"""
 
