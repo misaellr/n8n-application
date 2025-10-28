@@ -2032,14 +2032,20 @@ class FileUpdater:
             raise
 
 
-def load_existing_configuration(script_dir: Path, cloud_provider: str = "aws") -> DeploymentConfig:
+def load_existing_configuration(script_dir: Path, cloud_provider: str = "aws"):
     """Load deployment values from terraform/{cloud_provider}/terraform.tfvars"""
     tfvars_path = script_dir / "terraform" / cloud_provider / "terraform.tfvars"
 
     if not tfvars_path.exists():
         raise FileNotFoundError(f"terraform/{cloud_provider}/terraform.tfvars not found; run initial setup first")
 
-    config = DeploymentConfig()
+    # Create correct config object based on cloud provider
+    if cloud_provider == "gcp":
+        config = GCPDeploymentConfig()
+    elif cloud_provider == "azure":
+        config = AzureDeploymentConfig()
+    else:
+        config = DeploymentConfig()
 
     for raw_line in tfvars_path.read_text().splitlines():
         line = raw_line.strip()
@@ -2084,6 +2090,34 @@ def load_existing_configuration(script_dir: Path, cloud_provider: str = "aws") -
             config.n8n_persistence_size = str(parsed)
         elif key == 'enable_nginx_ingress':
             config.enable_nginx_ingress = bool(parsed)
+        # GCP-specific fields
+        elif key == 'gcp_project_id':
+            if hasattr(config, 'gcp_project_id'):
+                config.gcp_project_id = str(parsed)
+        elif key == 'gcp_region':
+            if hasattr(config, 'gcp_region'):
+                config.gcp_region = str(parsed)
+        elif key == 'gcp_zone':
+            if hasattr(config, 'gcp_zone'):
+                config.gcp_zone = str(parsed)
+        elif key == 'node_machine_type':
+            if hasattr(config, 'node_machine_type'):
+                config.node_machine_type = str(parsed)
+        elif key == 'node_count':
+            if hasattr(config, 'node_count'):
+                config.node_count = int(parsed)
+        elif key == 'vpc_name':
+            if hasattr(config, 'vpc_name'):
+                config.vpc_name = str(parsed)
+        elif key == 'subnet_name':
+            if hasattr(config, 'subnet_name'):
+                config.subnet_name = str(parsed)
+        elif key == 'database_type':
+            if hasattr(config, 'database_type'):
+                config.database_type = str(parsed)
+        elif key == 'cloudsql_tier':
+            if hasattr(config, 'cloudsql_tier'):
+                config.cloudsql_tier = str(parsed)
 
     if not config.n8n_host:
         raise ValueError("n8n_host is missing in terraform.tfvars")
