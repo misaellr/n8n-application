@@ -838,11 +838,13 @@ class ConfigurationPrompt:
         """Initialize configuration prompt
 
         Args:
-            cloud_provider: Either "aws" or "azure"
+            cloud_provider: Either "aws", "azure", or "gcp"
         """
         self.cloud_provider = cloud_provider
         if cloud_provider == "azure":
             self.config = AzureDeploymentConfig()
+        elif cloud_provider == "gcp":
+            self.config = GCPDeploymentConfig()
         else:
             self.config = AWSDeploymentConfig()
         self._interrupted = False
@@ -1412,6 +1414,303 @@ class ConfigurationPrompt:
             print(f"  High Avail:     {Colors.OKCYAN}{'Yes' if self.config.postgres_high_availability else 'No'}{Colors.ENDC}")
         print("=" * 60)
         print(f"\n{Colors.WARNING}Note: TLS and Basic Auth will be configured after deployment{Colors.ENDC}")
+
+        return self.config
+
+    def collect_gcp_configuration(self, skip_tls: bool = True) -> GCPDeploymentConfig:
+        """Collect GCP configuration from user
+
+        Args:
+            skip_tls: If True, skip TLS configuration (TLS will be configured after LoadBalancer is ready)
+        """
+        print(f"\n{Colors.HEADER}{Colors.BOLD}N8N GCP GKE Deployment Configuration{Colors.ENDC}")
+        print("=" * 60)
+
+        # GCP Configuration
+        print(f"\n{Colors.BOLD}GCP Configuration{Colors.ENDC}")
+
+        # Step 1: List and select GCP project
+        projects = GCPAuthChecker.list_projects()
+        if not projects:
+            print(f"\n{Colors.FAIL}✗ No GCP projects found{Colors.ENDC}")
+            print("\nPlease authenticate with GCP first:")
+            print(f"  {Colors.OKCYAN}gcloud auth login{Colors.ENDC}")
+            print(f"  {Colors.OKCYAN}gcloud config set project <project-id>{Colors.ENDC}")
+            raise SetupInterrupted("GCP authentication required")
+
+        if len(projects) == 1:
+            selected_project = projects[0]['projectId']
+            print(f"\n{Colors.OKGREEN}✓ Using project: {projects[0]['name']} ({selected_project}){Colors.ENDC}")
+        else:
+            print(f"\nAvailable GCP projects:")
+            project_choices = [f"{p['name']} ({p['projectId']})" for p in projects]
+            selection = self.prompt_choice(
+                "Select GCP Project",
+                project_choices,
+                default=0
+            )
+            # Extract project ID from selection (format: "Name (project-id)")
+            selected_project = selection.split('(')[1].rstrip(')')
+
+        self.config = GCPDeploymentConfig()
+        self.config.gcp_project_id = selected_project
+
+        # Step 2: Verify credentials
+        print(f"\n{Colors.HEADER}🔐 Verifying GCP credentials...{Colors.ENDC}")
+        success, message = GCPAuthChecker.verify_credentials(self.config.gcp_project_id)
+
+        if success:
+            print(f"{Colors.OKGREEN}✓ GCP credentials verified{Colors.ENDC}")
+            print(f"  {message}")
+        else:
+            print(f"{Colors.FAIL}✗ GCP authentication failed{Colors.ENDC}")
+            print(f"  {message}")
+            print(f"\n{Colors.WARNING}Please authenticate with GCP:{Colors.ENDC}")
+            print(f"  {Colors.OKCYAN}gcloud auth login{Colors.ENDC}")
+            print(f"  {Colors.OKCYAN}gcloud config set project {self.config.gcp_project_id}{Colors.ENDC}")
+            raise SetupInterrupted("GCP authentication required")
+
+        # Step 3: Check and optionally enable required APIs
+        print(f"\n{Colors.HEADER}🔍 Checking required GCP APIs...{Colors.ENDC}")
+        apis_ok, missing_apis = GCPAuthChecker.check_required_apis(self.config.gcp_project_id)
+
+        if not apis_ok:
+            print(f"{Colors.WARNING}⚠  The following APIs need to be enabled:{Colors.ENDC}")
+            for api in missing_apis:
+                print(f"  • {api}")
+
+            if self.prompt_yes_no("\nEnable required APIs now? (may take 1-2 minutes)", default=True):
+                print(f"\n{Colors.HEADER}Enabling APIs...{Colors.ENDC}")
+                for api in missing_apis:
+                    try:
+                        print(f"  Enabling {api}...")
+                        result = subprocess.run(
+                            ['gcloud', 'services', 'enable', api,
+                             '--project', self.config.gcp_project_id],
+                            capture_output=True,
+                            text=True,
+                            timeout=120
+                        )
+                        if result.returncode == 0:
+                            print(f"  {Colors.OKGREEN}✓ {api} enabled{Colors.ENDC}")
+                        else:
+                            print(f"  {Colors.FAIL}✗ Failed to enable {api}{Colors.ENDC}")
+                    except subprocess.TimeoutExpired:
+                        print(f"  {Colors.WARNING}⚠ Timeout enabling {api} (may still succeed in background){Colors.ENDC}")
+                    except Exception as e:
+                        print(f"  {Colors.FAIL}✗ Error enabling {api}: {e}{Colors.ENDC}")
+                print(f"\n{Colors.OKGREEN}✓ API enablement complete{Colors.ENDC}")
+            else:
+                print(f"\n{Colors.WARNING}You'll need to manually enable these APIs:{Colors.ENDC}")
+                for api in missing_apis:
+                    print(f"  {Colors.OKCYAN}gcloud services enable {api} --project {self.config.gcp_project_id}{Colors.ENDC}")
+                if not self.prompt_yes_no("\nContinue anyway?", default=False):
+                    raise SetupInterrupted("Required APIs not enabled")
+        else:
+            print(f"{Colors.OKGREEN}✓ All required APIs are enabled{Colors.ENDC}")
+
+        # Step 4: Select region
+        common_regions = [
+            "us-central1", "us-east1", "us-west1",
+            "europe-west1", "asia-southeast1"
+        ]
+        print(f"\nCommon regions: {', '.join(common_regions)}")
+        self.config.gcp_region = self.prompt(
+            "GCP Region",
+            default="us-central1",
+            required=True
+        )
+
+        # Step 5: Select zone (auto-append -a)
+        self.config.gcp_zone = f"{self.config.gcp_region}-a"
+        print(f"Zone: {Colors.OKCYAN}{self.config.gcp_zone}{Colors.ENDC}")
+
+        # Step 6: Cluster configuration
+        print(f"\n{Colors.BOLD}GKE Cluster Configuration{Colors.ENDC}")
+
+        self.config.cluster_name = self.prompt(
+            "GKE Cluster Name",
+            default="n8n-gke-cluster"
+        )
+
+        machine_type_choices = [
+            "e2-micro       (~$6/month for 1 node, minimal)",
+            "e2-small       (~$13/month for 1 node)",
+            "e2-medium      (~$27/month for 1 node) [Recommended]",
+            "n1-standard-1  (~$25/month for 1 node)",
+            "n1-standard-2  (~$49/month for 1 node)"
+        ]
+        machine_selection = self.prompt_choice(
+            "Node Machine Type",
+            machine_type_choices,
+            default=2
+        )
+        self.config.node_machine_type = machine_selection.split()[0]
+
+        self.config.node_count = int(self.prompt(
+            "Number of nodes",
+            default="1"
+        ))
+
+        # VPC naming
+        self.config.vpc_name = self.prompt(
+            "VPC Network Name",
+            default="n8n-vpc"
+        )
+
+        self.config.subnet_name = self.prompt(
+            "Subnet Name",
+            default="n8n-subnet"
+        )
+
+        # Step 7: N8N Configuration
+        print(f"\n{Colors.BOLD}N8N Configuration{Colors.ENDC}")
+
+        self.config.n8n_namespace = self.prompt(
+            "Kubernetes namespace for n8n",
+            default="n8n"
+        )
+
+        self.config.n8n_host = self.prompt(
+            "N8N Hostname (FQDN for ingress)",
+            default="n8n.example.com",
+            required=True
+        )
+
+        # Timezone
+        common_timezones = [
+            "America/New_York", "America/Chicago", "America/Los_Angeles",
+            "America/Bahia", "Europe/London", "Europe/Paris", "Asia/Tokyo"
+        ]
+        print(f"\nCommon timezones: {', '.join(common_timezones)}")
+        self.config.timezone = self.prompt(
+            "Timezone",
+            default="America/Bahia"
+        )
+
+        # Encryption key
+        if self.prompt_yes_no("\nGenerate a new n8n encryption key?", default=True):
+            self.config.n8n_encryption_key = secrets.token_hex(32)
+            print(f"{Colors.OKGREEN}✓ Generated new encryption key{Colors.ENDC}")
+        else:
+            while True:
+                key = self.prompt(
+                    "Enter existing n8n encryption key (64 hex characters)",
+                    required=True
+                )
+                if len(key) == 64 and all(c in '0123456789abcdefABCDEF' for c in key):
+                    self.config.n8n_encryption_key = key
+                    break
+                else:
+                    print(f"{Colors.FAIL}✗ Invalid format. Key must be 64 hexadecimal characters.{Colors.ENDC}")
+
+        # Step 8: Database Configuration
+        print(f"\n{Colors.BOLD}Database Configuration{Colors.ENDC}")
+        print("\nChoose database backend for n8n:")
+        db_choice = self.prompt_choice(
+            "Database Type",
+            [
+                "SQLite (file-based, simpler, lower cost)",
+                "Cloud SQL PostgreSQL (managed, production-grade, ~$25-80/month)"
+            ],
+            default=0
+        )
+
+        if "Cloud SQL" in db_choice:
+            self.config.database_type = "cloudsql"
+
+            self.config.cloudsql_instance_name = self.prompt(
+                "Cloud SQL Instance Name",
+                default="n8n-postgres"
+            )
+
+            cloudsql_tier_choices = [
+                "db-f1-micro      (Shared CPU, 614MB RAM, ~$25/month)",
+                "db-g1-small      (Shared CPU, 1.7GB RAM, ~$50/month)",
+                "db-n1-standard-1 (1 vCPU, 3.75GB RAM, ~$80/month)"
+            ]
+            tier_selection = self.prompt_choice(
+                "Cloud SQL Tier",
+                cloudsql_tier_choices,
+                default=0
+            )
+            self.config.cloudsql_tier = tier_selection.split()[0]
+
+            print(f"\n{Colors.OKGREEN}✓ Cloud SQL PostgreSQL will be provisioned{Colors.ENDC}")
+        else:
+            self.config.database_type = "sqlite"
+            print(f"\n{Colors.OKGREEN}✓ SQLite will be used (file-based on persistent disk){Colors.ENDC}")
+
+        # Step 9: TLS Configuration (if not skip_tls)
+        if not skip_tls:
+            print(f"\n{Colors.BOLD}TLS/HTTPS Configuration{Colors.ENDC}")
+            if self.prompt_yes_no("\nEnable HTTPS/TLS?", default=False):
+                self.config.n8n_protocol = "https"
+                self.config.enable_tls = True
+                self.config.tls_provider = "letsencrypt"
+
+                self.config.letsencrypt_email = self.prompt(
+                    "Email for Let's Encrypt notifications",
+                    required=True
+                )
+            else:
+                self.config.n8n_protocol = "http"
+                self.config.enable_tls = False
+        else:
+            self.config.n8n_protocol = "http"
+            self.config.enable_tls = False
+
+        # Step 10: Basic Authentication (if not skip_tls)
+        if not skip_tls:
+            print(f"\n{Colors.BOLD}Basic Authentication{Colors.ENDC}")
+            if self.prompt_yes_no("\nEnable basic authentication (username/password)?", default=False):
+                self.config.enable_basic_auth = True
+                self.config.basic_auth_username = self.prompt(
+                    "Basic auth username",
+                    default="admin"
+                )
+                while True:
+                    password = self.prompt(
+                        "Basic auth password (min 8 characters)",
+                        required=True
+                    )
+                    if len(password) >= 8:
+                        self.config.basic_auth_password = password
+                        break
+                    else:
+                        print(f"{Colors.FAIL}✗ Password must be at least 8 characters{Colors.ENDC}")
+            else:
+                self.config.enable_basic_auth = False
+        else:
+            self.config.enable_basic_auth = False
+
+        # Show configuration summary
+        print(f"\n{Colors.HEADER}{Colors.BOLD}Configuration Summary{Colors.ENDC}")
+        print("=" * 60)
+        print(f"Project ID:      {Colors.OKCYAN}{self.config.gcp_project_id}{Colors.ENDC}")
+        print(f"Region:          {Colors.OKCYAN}{self.config.gcp_region}{Colors.ENDC}")
+        print(f"Zone:            {Colors.OKCYAN}{self.config.gcp_zone}{Colors.ENDC}")
+        print(f"GKE Cluster:     {Colors.OKCYAN}{self.config.cluster_name}{Colors.ENDC}")
+        print(f"Machine Type:    {Colors.OKCYAN}{self.config.node_machine_type}{Colors.ENDC}")
+        print(f"Node Count:      {Colors.OKCYAN}{self.config.node_count}{Colors.ENDC}")
+        print(f"VPC:             {Colors.OKCYAN}{self.config.vpc_name}{Colors.ENDC}")
+        print(f"Subnet:          {Colors.OKCYAN}{self.config.subnet_name}{Colors.ENDC}")
+        print(f"N8N Host:        {Colors.OKCYAN}{self.config.n8n_host}{Colors.ENDC}")
+        print(f"Protocol:        {Colors.OKCYAN}{self.config.n8n_protocol.upper()}{Colors.ENDC}")
+        print(f"Namespace:       {Colors.OKCYAN}{self.config.n8n_namespace}{Colors.ENDC}")
+        print(f"Timezone:        {Colors.OKCYAN}{self.config.timezone}{Colors.ENDC}")
+        print(f"Encryption Key:  {Colors.OKCYAN}{'*' * 20} (hidden){Colors.ENDC}")
+        print(f"Database Type:   {Colors.OKCYAN}{self.config.database_type.upper()}{Colors.ENDC}")
+        if self.config.database_type == "cloudsql":
+            print(f"  Instance Name: {Colors.OKCYAN}{self.config.cloudsql_instance_name}{Colors.ENDC}")
+            print(f"  Tier:          {Colors.OKCYAN}{self.config.cloudsql_tier}{Colors.ENDC}")
+        print("=" * 60)
+
+        if skip_tls:
+            print(f"\n{Colors.WARNING}Note: TLS and Basic Auth will be configured after deployment{Colors.ENDC}")
+
+        if not self.prompt_yes_no("\nProceed with this configuration?", default=True):
+            raise SetupInterrupted("Configuration cancelled by user")
 
         return self.config
 
