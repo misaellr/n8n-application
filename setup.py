@@ -342,6 +342,7 @@ class GCPDeploymentConfig:
         # TLS settings (matches AWS/Azure pattern)
         self.enable_tls: bool = False
         self.tls_provider: str = "letsencrypt"  # "letsencrypt" or "custom"
+        self.tls_certificate_source: str = "none"  # "none", "byo", or "letsencrypt"
         self.letsencrypt_email: str = ""
 
         # Basic auth settings (matches AWS/Azure pattern)
@@ -372,6 +373,7 @@ class GCPDeploymentConfig:
             'timezone': self.timezone,
             'enable_tls': self.enable_tls,
             'tls_provider': self.tls_provider,
+            'tls_certificate_source': self.tls_certificate_source,
             'letsencrypt_email': self.letsencrypt_email,
             'enable_basic_auth': self.enable_basic_auth,
             'basic_auth_username': self.basic_auth_username,
