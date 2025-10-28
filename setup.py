@@ -427,6 +427,16 @@ class DependencyChecker:
         }
     }
 
+    GCP_TOOLS = {
+        'gcloud': {
+            'command': 'gcloud version',
+            'version_regex': r'Google Cloud SDK ([0-9]+\.[0-9]+\.[0-9]+)',
+            'min_version': '400.0.0',
+            'install_url': 'https://cloud.google.com/sdk/docs/install',
+            'description': 'Google Cloud Command Line Interface'
+        }
+    }
+
     # Backward compatibility
     REQUIRED_TOOLS = {**COMMON_TOOLS, **AWS_TOOLS}
 
@@ -464,13 +474,18 @@ class DependencyChecker:
         """Check all required dependencies for deployment
 
         Args:
-            cloud_provider: Either "aws" or "azure"
+            cloud_provider: Either "aws", "azure", or "gcp"
         """
         missing = []
         outdated = []
         import re
 
-        provider_name = "AWS EKS" if cloud_provider == "aws" else "Azure AKS"
+        provider_names = {
+            "aws": "AWS EKS",
+            "azure": "Azure AKS",
+            "gcp": "GCP GKE"
+        }
+        provider_name = provider_names.get(cloud_provider, "AWS EKS")
         print(f"\n{Colors.HEADER}🔍 Checking dependencies for {provider_name} deployment...{Colors.ENDC}")
 
         # Check Python version first
@@ -487,6 +502,8 @@ class DependencyChecker:
         # Select tools based on cloud provider
         if cloud_provider == "azure":
             required_tools = {**cls.COMMON_TOOLS, **cls.AZURE_TOOLS}
+        elif cloud_provider == "gcp":
+            required_tools = {**cls.COMMON_TOOLS, **cls.GCP_TOOLS}
         else:
             required_tools = {**cls.COMMON_TOOLS, **cls.AWS_TOOLS}
 
