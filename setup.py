@@ -4872,6 +4872,64 @@ WORKFLOW:
                     print(f"{Colors.WARNING}⚠  kubectl configuration failed. Run manually:{Colors.ENDC}")
                     print(f"  {Colors.OKCYAN}{kubectl_cmd}{Colors.ENDC}")
                     raise Exception("kubectl configuration required")
+
+            # Verify and switch kubectl context to target cluster
+            print(f"\n{Colors.HEADER}🔍 Verifying kubectl context...{Colors.ENDC}")
+
+            # Determine expected context name based on cloud provider
+            if cloud_provider == "gcp":
+                # GKE context format: gke_PROJECT_REGION_CLUSTER
+                expected_context = f"gke_{config.gcp_project_id}_{config.gcp_region}_{config.cluster_name}"
+            elif cloud_provider == "azure":
+                # AKS context is just the cluster name
+                expected_context = config.cluster_name
+            else:  # AWS
+                # EKS context format includes account ID, but we can match on cluster name
+                expected_context = config.cluster_name
+
+            # Get current context
+            result = subprocess.run(['kubectl', 'config', 'current-context'],
+                                   capture_output=True, text=True)
+            current_context = result.stdout.strip()
+
+            # Verify or switch context
+            if expected_context not in current_context:
+                print(f"{Colors.WARNING}⚠  kubectl context mismatch{Colors.ENDC}")
+                print(f"  Current: {current_context}")
+                print(f"  Expected context containing: {expected_context}")
+
+                # List available contexts and find the matching one
+                result = subprocess.run(['kubectl', 'config', 'get-contexts', '-o', 'name'],
+                                       capture_output=True, text=True)
+                available_contexts = result.stdout.strip().split('\n')
+
+                # Find the context that matches our cluster
+                target_context = None
+                for ctx in available_contexts:
+                    if expected_context in ctx:
+                        target_context = ctx
+                        break
+
+                if not target_context:
+                    print(f"{Colors.FAIL}✗ Could not find matching kubectl context{Colors.ENDC}")
+                    print(f"\n{Colors.WARNING}Available contexts:{Colors.ENDC}")
+                    for ctx in available_contexts:
+                        print(f"  - {ctx}")
+                    print(f"\n{Colors.WARNING}Expected to find context containing: {expected_context}{Colors.ENDC}")
+                    raise Exception("kubectl context not found - run the configure_kubectl command manually")
+
+                print(f"\n{Colors.HEADER}Switching kubectl context...{Colors.ENDC}")
+                result = subprocess.run(['kubectl', 'config', 'use-context', target_context],
+                                       capture_output=True, text=True)
+                if result.returncode == 0:
+                    print(f"{Colors.OKGREEN}✓ Switched to {target_context}{Colors.ENDC}")
+                else:
+                    print(f"{Colors.FAIL}✗ Failed to switch context{Colors.ENDC}")
+                    print(f"  Error: {result.stderr}")
+                    raise Exception("kubectl context switch required")
+            else:
+                print(f"{Colors.OKGREEN}✓ kubectl context correct: {current_context}{Colors.ENDC}")
+
         else:
             # Route to appropriate deployment based on cloud provider
             if cloud_provider == "azure":
