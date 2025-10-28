@@ -237,17 +237,17 @@ output "workload_identity_annotation" {
 output "deployment_summary" {
   description = "Summary of deployed resources"
   value = {
-    project_id          = var.gcp_project_id
-    region              = var.gcp_region
-    cluster_name        = google_container_cluster.primary.name
-    cluster_endpoint    = google_container_cluster.primary.endpoint
-    node_count          = google_container_node_pool.primary_nodes.node_count
-    node_machine_type   = var.node_machine_type
-    database_type       = var.database_type
-    vpc_name            = google_compute_network.vpc.name
-    workload_sa         = google_service_account.n8n_workload.email
-    n8n_namespace       = var.n8n_namespace
-    kubectl_cmd         = "gcloud container clusters get-credentials ${google_container_cluster.primary.name} --region ${google_container_cluster.primary.location} --project ${var.gcp_project_id}"
+    project_id        = var.gcp_project_id
+    region            = var.gcp_region
+    cluster_name      = google_container_cluster.primary.name
+    cluster_endpoint  = google_container_cluster.primary.endpoint
+    node_count        = google_container_node_pool.primary_nodes.node_count
+    node_machine_type = var.node_machine_type
+    database_type     = var.database_type
+    vpc_name          = google_compute_network.vpc.name
+    workload_sa       = google_service_account.n8n_workload.email
+    n8n_namespace     = var.n8n_namespace
+    kubectl_cmd       = "gcloud container clusters get-credentials ${google_container_cluster.primary.name} --region ${google_container_cluster.primary.location} --project ${var.gcp_project_id}"
   }
   sensitive = true
 }
