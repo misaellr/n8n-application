@@ -5048,19 +5048,29 @@ WORKFLOW:
         print("=" * 60)
 
         helm_runner = HelmRunner(script_dir / "charts" / "n8n")
+
+        # Get encryption key from outputs (AWS/Azure) or config (GCP stores in Secret Manager)
         encryption_key = outputs.get('n8n_encryption_key_value', '')
+        if not encryption_key and hasattr(config, 'n8n_encryption_key'):
+            encryption_key = config.n8n_encryption_key
 
         if not encryption_key:
-            raise Exception("Failed to retrieve encryption key from Terraform outputs")
+            raise Exception("Failed to retrieve encryption key from Terraform outputs or configuration")
 
         # Prepare database configuration from Terraform outputs
         db_config = {
             'database_type': outputs.get('database_type', 'sqlite'),
+            # AWS RDS
             'rds_address': outputs.get('rds_address'),
             'rds_port': outputs.get('rds_port'),
             'rds_database_name': outputs.get('rds_database_name'),
             'rds_username': outputs.get('rds_username'),
             'rds_password': outputs.get('rds_password'),
+            # GCP Cloud SQL
+            'cloudsql_instance_connection_name': outputs.get('cloudsql_instance_connection_name'),
+            'cloudsql_database_name': outputs.get('cloudsql_database_name'),
+            'cloudsql_username': outputs.get('cloudsql_username'),
+            'cloudsql_private_ip': outputs.get('cloudsql_private_ip'),
         }
 
         # Deploy n8n without TLS initially (but with database configuration)
