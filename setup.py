@@ -2406,8 +2406,9 @@ class HelmRunner:
         print(f"\n{Colors.HEADER}🎯 Deploying n8n application...{Colors.ENDC}")
 
         # Build helm values
+        # Use 'upgrade --install' for idempotent deployments (installs if not exists, upgrades if exists)
         values_args = [
-            'install', 'n8n', str(self.helm_dir),
+            'upgrade', '--install', 'n8n', str(self.helm_dir),
             '--namespace', namespace,
             '--create-namespace',
             '--set', f'ingress.enabled=true',
