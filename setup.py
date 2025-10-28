@@ -336,6 +336,8 @@ class GCPDeploymentConfig:
         self.n8n_host: str = ""
         self.n8n_protocol: str = "http"
         self.n8n_encryption_key: str = ""
+        self.n8n_persistence_size: str = "10Gi"
+        self.timezone: str = "America/New_York"
 
         # TLS settings (matches AWS/Azure pattern)
         self.enable_tls: bool = False
@@ -366,6 +368,8 @@ class GCPDeploymentConfig:
             'n8n_host': self.n8n_host,
             'n8n_protocol': self.n8n_protocol,
             'n8n_encryption_key': self.n8n_encryption_key,
+            'n8n_persistence_size': self.n8n_persistence_size,
+            'timezone': self.timezone,
             'enable_tls': self.enable_tls,
             'tls_provider': self.tls_provider,
             'letsencrypt_email': self.letsencrypt_email,
