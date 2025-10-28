@@ -3868,6 +3868,320 @@ def deploy_azure_terraform(config: AzureDeploymentConfig, terraform_dir: Path) -
     return True
 
 
+def deploy_gcp_terraform(config: GCPDeploymentConfig, terraform_dir: Path) -> bool:
+    """Deploy GCP infrastructure with Terraform
+
+    Args:
+        config: GCP deployment configuration
+        terraform_dir: Path to GCP Terraform directory
+
+    Returns:
+        bool: True if deployment succeeded
+    """
+    print(f"\n{Colors.HEADER}{Colors.BOLD}🏗️  PHASE 1: Terraform Infrastructure Deployment{Colors.ENDC}")
+    print("=" * 60)
+
+    # Initialize Terraform using TerraformRunner
+    tf_runner = TerraformRunner(terraform_dir)
+
+    # Initialize
+    print(f"\n{Colors.HEADER}Initializing Terraform...{Colors.ENDC}")
+    if not tf_runner.init():
+        print(f"{Colors.FAIL}✗ Terraform init failed{Colors.ENDC}")
+        return False
+
+    # Plan
+    print(f"\n{Colors.HEADER}Planning infrastructure...{Colors.ENDC}")
+    success, output = tf_runner.plan(display_output=False)
+    if not success:
+        print(f"{Colors.FAIL}✗ Terraform plan failed{Colors.ENDC}")
+        print(output)
+        return False
+
+    # Show plan summary
+    print(f"{Colors.OKGREEN}✓ Terraform plan completed{Colors.ENDC}")
+    print(f"\n{Colors.BOLD}Plan Summary:{Colors.ENDC}")
+    print("=" * 60)
+    print(output)
+    print("=" * 60)
+
+    # Save current state before applying (to preserve previous region's state)
+    print(f"\n{Colors.HEADER}💾 Saving current state before deployment...{Colors.ENDC}")
+    tfstate_path = terraform_dir / "terraform.tfstate"
+    if tfstate_path.exists():
+        try:
+            with open(tfstate_path, 'r') as f:
+                existing_state = json.load(f)
+                if existing_state.get('resources'):
+                    # Try to detect region from existing state
+                    existing_region = None
+                    for resource in existing_state.get('resources', []):
+                        if resource.get('type') == 'google_container_cluster':
+                            instances = resource.get('instances', [])
+                            if instances:
+                                location = instances[0].get('attributes', {}).get('location', '')
+                                if location:
+                                    existing_region = location
+                                    break
+
+                    if existing_region:
+                        save_state_for_region(terraform_dir, existing_region)
+                    else:
+                        print(f"{Colors.OKCYAN}  Could not detect region from existing state, using timestamp backup{Colors.ENDC}")
+                        timestamp = int(time.time())
+                        backup_path = terraform_dir / f"terraform.tfstate.{timestamp}.backup"
+                        shutil.copy2(tfstate_path, backup_path)
+                        print(f"{Colors.OKGREEN}✓ Saved current state to {backup_path.name}{Colors.ENDC}")
+        except Exception as e:
+            print(f"{Colors.WARNING}⚠  Could not save existing state: {e}{Colors.ENDC}")
+
+    # Apply
+    print(f"\n{Colors.HEADER}Deploying infrastructure (this may take 10-15 minutes)...{Colors.ENDC}")
+    print(f"{Colors.WARNING}This will create real GCP resources and may incur costs.{Colors.ENDC}\n")
+
+    if not tf_runner.apply():
+        print(f"{Colors.FAIL}✗ Terraform apply failed{Colors.ENDC}")
+        return False
+
+    print(f"{Colors.OKGREEN}✓ GCP infrastructure deployed{Colors.ENDC}")
+
+    # Save newly created state with region name
+    print(f"\n{Colors.HEADER}💾 Saving state for region {config.gcp_region}...{Colors.ENDC}")
+    save_state_for_region(terraform_dir, config.gcp_region)
+
+    # Get kubeconfig
+    print(f"\n{Colors.HEADER}Configuring kubectl...{Colors.ENDC}")
+    result = subprocess.run([
+        'gcloud', 'container', 'clusters', 'get-credentials',
+        config.cluster_name,
+        '--region', config.gcp_region,
+        '--project', config.gcp_project_id
+    ], capture_output=True, text=True)
+
+    if result.returncode == 0:
+        print(f"{Colors.OKGREEN}✓ kubectl configured for GKE cluster{Colors.ENDC}")
+    else:
+        print(f"{Colors.FAIL}✗ Failed to configure kubectl{Colors.ENDC}")
+        print(result.stderr)
+        return False
+
+    # Verify cluster access
+    result = subprocess.run(['kubectl', 'cluster-info'], capture_output=True, text=True, timeout=30)
+    if result.returncode == 0:
+        print(f"{Colors.OKGREEN}✓ Cluster accessible{Colors.ENDC}")
+    else:
+        print(f"{Colors.WARNING}⚠  Cluster info check failed, but continuing...{Colors.ENDC}")
+
+    return True
+
+
+def deploy_gcp_helm(config: GCPDeploymentConfig, charts_dir: Path, encryption_key: str) -> bool:
+    """Deploy n8n to GCP GKE via Helm
+
+    Args:
+        config: GCP deployment configuration
+        charts_dir: Path to Helm charts directory
+        encryption_key: n8n encryption key
+
+    Returns:
+        bool: True if deployment succeeded
+    """
+    print(f"\n{Colors.HEADER}{Colors.BOLD}🚀 PHASE 2: Helm Application Deployment{Colors.ENDC}")
+    print("=" * 60)
+
+    # Create namespace and service account with workload identity
+    print(f"\n{Colors.HEADER}Setting up Kubernetes namespace and workload identity...{Colors.ENDC}")
+
+    # Create namespace
+    namespace_yaml = f"""apiVersion: v1
+kind: Namespace
+metadata:
+  name: {config.n8n_namespace}
+"""
+
+    result = subprocess.run(
+        ['kubectl', 'apply', '-f', '-'],
+        input=namespace_yaml,
+        text=True,
+        capture_output=True
+    )
+
+    if result.returncode == 0:
+        print(f"{Colors.OKGREEN}✓ Namespace created/updated{Colors.ENDC}")
+    else:
+        print(f"{Colors.WARNING}⚠  Namespace creation returned: {result.stderr}{Colors.ENDC}")
+
+    # Get workload identity email from terraform outputs
+    workload_sa_email = None
+    try:
+        terraform_dir = charts_dir.parent / "terraform" / "gcp"
+        tf_runner = TerraformRunner(terraform_dir)
+        outputs = tf_runner.get_outputs()
+        workload_sa_email = outputs.get('n8n_workload_sa_email', None)
+        if workload_sa_email:
+            print(f"{Colors.OKGREEN}✓ Workload identity SA: {workload_sa_email}{Colors.ENDC}")
+    except Exception as e:
+        print(f"{Colors.WARNING}⚠  Could not get workload SA email from Terraform: {e}{Colors.ENDC}")
+
+    # Create Kubernetes service account with workload identity annotation
+    if workload_sa_email:
+        sa_yaml = f"""apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: n8n
+  namespace: {config.n8n_namespace}
+  annotations:
+    iam.gke.io/gcp-service-account: {workload_sa_email}
+"""
+
+        result = subprocess.run(
+            ['kubectl', 'apply', '-f', '-'],
+            input=sa_yaml,
+            text=True,
+            capture_output=True
+        )
+
+        if result.returncode == 0:
+            print(f"{Colors.OKGREEN}✓ Service account created with workload identity{Colors.ENDC}")
+        else:
+            print(f"{Colors.WARNING}⚠  Service account creation returned: {result.stderr}{Colors.ENDC}")
+
+    # Prepare Helm values
+    helm_values = {
+        'image.tag': 'latest',
+        'serviceAccount.create': 'false',  # We created it above
+        'serviceAccount.name': 'n8n',
+        'ingress.enabled': 'false',  # GCP uses LoadBalancer service
+        'service.type': 'LoadBalancer',
+        'persistence.enabled': 'true',
+        'persistence.size': '10Gi',
+        'persistence.storageClass': 'standard-rwo',  # GCP default
+        'env.N8N_HOST': config.n8n_host or 'n8n.local',
+        'env.N8N_PROTOCOL': config.n8n_protocol,
+        'env.GENERIC_TIMEZONE': 'America/Los_Angeles',
+        'env.TZ': 'America/Los_Angeles',
+    }
+
+    # Handle Cloud SQL connection if using Cloud SQL
+    if config.database_type == 'cloudsql':
+        print(f"\n{Colors.HEADER}Configuring Cloud SQL connection...{Colors.ENDC}")
+
+        # Get Cloud SQL connection name from terraform outputs
+        try:
+            cloudsql_connection_name = outputs.get('cloudsql_instance_connection_name', None)
+            cloudsql_username = outputs.get('cloudsql_username', 'n8n')
+            cloudsql_database = outputs.get('cloudsql_database_name', 'n8n')
+
+            if cloudsql_connection_name:
+                print(f"{Colors.OKGREEN}✓ Cloud SQL instance: {cloudsql_connection_name}{Colors.ENDC}")
+
+                # Configure Cloud SQL proxy sidecar
+                helm_values.update({
+                    'database.type': 'postgresdb',
+                    'database.postgresdb.host': '127.0.0.1',  # Cloud SQL proxy localhost
+                    'database.postgresdb.port': '5432',
+                    'database.postgresdb.database': cloudsql_database,
+                    'database.postgresdb.user': cloudsql_username,
+                    # Password will be from Secret Manager via workload identity
+                })
+
+                print(f"{Colors.OKCYAN}  Database: PostgreSQL via Cloud SQL proxy{Colors.ENDC}")
+            else:
+                print(f"{Colors.WARNING}⚠  Could not get Cloud SQL connection name, using SQLite{Colors.ENDC}")
+        except Exception as e:
+            print(f"{Colors.WARNING}⚠  Error configuring Cloud SQL: {e}{Colors.ENDC}")
+            print(f"{Colors.OKCYAN}  Falling back to SQLite{Colors.ENDC}")
+
+    # Build helm command
+    helm_cmd = [
+        'helm', 'upgrade', '--install', 'n8n',
+        str(charts_dir / 'n8n'),
+        '--namespace', config.n8n_namespace,
+        '--create-namespace',
+        '--set-string', f'envSecrets.N8N_ENCRYPTION_KEY={encryption_key}'
+    ]
+
+    # Add other values
+    for key, value in helm_values.items():
+        helm_cmd.extend(['--set-string', f'{key}={value}'])
+
+    # Check if values-gcp.yaml exists
+    values_gcp = charts_dir / 'n8n' / 'values-gcp.yaml'
+    if values_gcp.exists():
+        helm_cmd.extend(['--values', str(values_gcp)])
+        print(f"{Colors.OKCYAN}  Using values-gcp.yaml{Colors.ENDC}")
+
+    # Deploy
+    print(f"\n{Colors.HEADER}Deploying n8n via Helm...{Colors.ENDC}")
+    result = subprocess.run(helm_cmd, capture_output=True, text=True, timeout=600)
+
+    if result.returncode != 0:
+        print(f"{Colors.FAIL}✗ Helm deployment failed{Colors.ENDC}")
+        print(result.stderr)
+        return False
+
+    print(f"{Colors.OKGREEN}✓ n8n deployed to GCP GKE{Colors.ENDC}")
+
+    # Wait for deployment to be ready
+    print(f"\n{Colors.HEADER}Waiting for n8n pods to be ready...{Colors.ENDC}")
+    result = subprocess.run([
+        'kubectl', 'wait', '--for=condition=ready',
+        'pod', '-l', 'app.kubernetes.io/name=n8n',
+        '-n', config.n8n_namespace,
+        '--timeout=300s'
+    ], capture_output=True, text=True)
+
+    if result.returncode == 0:
+        print(f"{Colors.OKGREEN}✓ n8n pods are ready{Colors.ENDC}")
+    else:
+        print(f"{Colors.WARNING}⚠  Pod readiness check timed out, check manually with:{Colors.ENDC}")
+        print(f"  {Colors.OKCYAN}kubectl get pods -n {config.n8n_namespace}{Colors.ENDC}")
+
+    # Get LoadBalancer external IP
+    print(f"\n{Colors.HEADER}Retrieving LoadBalancer external IP...{Colors.ENDC}")
+    loadbalancer_ip = None
+    max_retries = 12
+    for i in range(max_retries):
+        result = subprocess.run([
+            'kubectl', 'get', 'svc', 'n8n',
+            '-n', config.n8n_namespace,
+            '-o', 'jsonpath={.status.loadBalancer.ingress[0].ip}'
+        ], capture_output=True, text=True)
+
+        if result.returncode == 0 and result.stdout.strip():
+            loadbalancer_ip = result.stdout.strip()
+            break
+
+        if i < max_retries - 1:
+            print(f"{Colors.OKCYAN}  Waiting for LoadBalancer IP... ({i+1}/{max_retries}){Colors.ENDC}")
+            time.sleep(10)
+
+    # Show access information
+    print(f"\n{Colors.OKGREEN}{Colors.BOLD}{'=' * 60}{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}{Colors.BOLD}  ✅ N8N DEPLOYMENT COMPLETE!{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}{Colors.BOLD}{'=' * 60}{Colors.ENDC}")
+
+    if loadbalancer_ip:
+        print(f"\n{Colors.BOLD}Access Information:{Colors.ENDC}")
+        print(f"  n8n URL: {Colors.OKCYAN}{config.n8n_protocol}://{loadbalancer_ip}{Colors.ENDC}")
+        print(f"  LoadBalancer IP: {Colors.OKCYAN}{loadbalancer_ip}{Colors.ENDC}")
+        if config.n8n_host and config.n8n_host != 'n8n.local':
+            print(f"\n{Colors.WARNING}⚠  Configure DNS:{Colors.ENDC} Point {config.n8n_host} to {loadbalancer_ip}")
+    else:
+        print(f"\n{Colors.BOLD}Get LoadBalancer IP with:{Colors.ENDC}")
+        print(f"  {Colors.OKCYAN}kubectl get svc -n {config.n8n_namespace} n8n{Colors.ENDC}")
+
+    print(f"\n{Colors.BOLD}Verify deployment:{Colors.ENDC}")
+    print(f"  {Colors.OKCYAN}kubectl get pods -n {config.n8n_namespace}{Colors.ENDC}")
+    print(f"  {Colors.OKCYAN}kubectl get svc -n {config.n8n_namespace}{Colors.ENDC}")
+
+    if config.database_type == 'cloudsql':
+        print(f"\n{Colors.BOLD}Verify Cloud SQL connection:{Colors.ENDC}")
+        print(f"  {Colors.OKCYAN}kubectl logs -n {config.n8n_namespace} -l app.kubernetes.io/name=n8n{Colors.ENDC}")
+
+    return True
+
+
 def deploy_azure_helm(config: AzureDeploymentConfig, charts_dir: Path, encryption_key: str) -> bool:
     """Deploy n8n to Azure AKS via Helm
 
