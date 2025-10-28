@@ -371,6 +371,7 @@ class GCPDeploymentConfig:
             'letsencrypt_email': self.letsencrypt_email,
             'enable_basic_auth': self.enable_basic_auth,
             'basic_auth_username': self.basic_auth_username,
+            'basic_auth_password': self.basic_auth_password,
         }
 
 class DependencyChecker:
