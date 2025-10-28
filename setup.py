@@ -4519,6 +4519,55 @@ WORKFLOW:
                 success = teardown.execute()
                 sys.exit(0 if success else 1)
 
+            elif cloud_provider == "gcp":
+                # GCP teardown flow
+                config = GCPDeploymentConfig()
+
+                # Try to detect config from GCP terraform.tfvars
+                tfvars_path = script_dir / "terraform" / "gcp" / "terraform.tfvars"
+                if tfvars_path.exists():
+                    try:
+                        content = tfvars_path.read_text()
+                        for line in content.split('\n'):
+                            if 'gcp_project_id' in line and '=' in line:
+                                config.gcp_project_id = line.split('=')[1].strip().strip('"')
+                            elif 'gcp_region' in line and '=' in line:
+                                config.gcp_region = line.split('=')[1].strip().strip('"')
+                            elif 'cluster_name' in line and '=' in line:
+                                config.cluster_name = line.split('=')[1].strip().strip('"')
+                            elif 'n8n_namespace' in line and '=' in line:
+                                config.n8n_namespace = line.split('=')[1].strip().strip('"')
+                        print(f"{Colors.OKGREEN}✓ Loaded GCP configuration{Colors.ENDC}")
+                    except Exception as e:
+                        print(f"{Colors.WARNING}⚠  Could not load GCP config: {e}{Colors.ENDC}")
+
+                # Show detected configuration
+                print(f"\n{Colors.HEADER}GCP GKE Teardown Configuration:{Colors.ENDC}")
+                print("=" * 60)
+                print(f"Project ID:      {Colors.OKCYAN}{config.gcp_project_id}{Colors.ENDC}")
+                print(f"Region:          {Colors.OKCYAN}{config.gcp_region}{Colors.ENDC}")
+                print(f"Cluster:         {Colors.OKCYAN}{config.cluster_name}{Colors.ENDC}")
+                print(f"Namespace:       {Colors.OKCYAN}{config.n8n_namespace}{Colors.ENDC}")
+                print("=" * 60)
+
+                # Confirm teardown
+                prompt = ConfigurationPrompt()
+                if not prompt.prompt_yes_no(f"\n{Colors.WARNING}⚠️  This will DESTROY all GCP resources. Continue?{Colors.ENDC}", default=False):
+                    print(f"\n{Colors.OKCYAN}Teardown cancelled{Colors.ENDC}")
+                    sys.exit(0)
+
+                # Execute teardown
+                print(f"\n{Colors.HEADER}🗑️  Destroying GCP resources...{Colors.ENDC}")
+                terraform_dir = script_dir / "terraform" / "gcp"
+                tf_runner = TerraformRunner(terraform_dir)
+
+                if tf_runner.destroy():
+                    print(f"\n{Colors.OKGREEN}✅ GCP resources destroyed successfully{Colors.ENDC}")
+                    sys.exit(0)
+                else:
+                    print(f"\n{Colors.FAIL}✗ Teardown failed{Colors.ENDC}")
+                    sys.exit(1)
+
             else:
                 # AWS teardown flow (existing code)
                 config = None
@@ -4777,6 +4826,42 @@ WORKFLOW:
                 print(f"  {Colors.OKCYAN}kubectl get ingress -n {config.n8n_namespace}{Colors.ENDC}")
                 print(f"  {Colors.OKCYAN}kubectl logs -f deployment/n8n -n {config.n8n_namespace}{Colors.ENDC}")
                 print(f"  {Colors.OKCYAN}kubectl get svc -n ingress-nginx{Colors.ENDC}")
+
+                print("\n" + "=" * 60)
+
+            elif cloud_provider == "gcp":
+                # ═══════════════════════════════════════════════════════════════
+                # GCP GKE DEPLOYMENT FLOW
+                # ═══════════════════════════════════════════════════════════════
+
+                # Collect GCP configuration
+                print(f"\n{Colors.HEADER}Let's configure your GCP GKE deployment...{Colors.ENDC}")
+                prompt = ConfigurationPrompt(cloud_provider="gcp")
+                config = prompt.collect_gcp_configuration(skip_tls=True)
+
+                # Save configuration to history
+                ConfigHistoryManager.save_configuration(config, "gcp", script_dir)
+
+                # Create Terraform tfvars
+                updater = FileUpdater(script_dir)
+                updater.create_terraform_tfvars_gcp(config)
+
+                # Deploy GCP infrastructure via Terraform
+                terraform_dir = script_dir / "terraform" / "gcp"
+                if not deploy_gcp_terraform(config, terraform_dir):
+                    raise Exception("GCP infrastructure deployment failed")
+
+                # Deploy n8n application via Helm
+                charts_dir = script_dir / "charts"
+                if not deploy_gcp_helm(config, charts_dir, config.n8n_encryption_key):
+                    raise Exception("GCP n8n deployment failed")
+
+                print(f"\n{Colors.BOLD}Useful Commands:{Colors.ENDC}")
+                print(f"  {Colors.OKCYAN}kubectl get pods -n {config.n8n_namespace}{Colors.ENDC}")
+                print(f"  {Colors.OKCYAN}kubectl get svc -n {config.n8n_namespace}{Colors.ENDC}")
+                print(f"  {Colors.OKCYAN}kubectl logs -f deployment/n8n -n {config.n8n_namespace}{Colors.ENDC}")
+                if config.database_type == 'cloudsql':
+                    print(f"  {Colors.OKCYAN}kubectl describe pod -n {config.n8n_namespace} -l app.kubernetes.io/name=n8n{Colors.ENDC}")
 
                 print("\n" + "=" * 60)
 
