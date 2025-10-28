@@ -42,6 +42,18 @@ The module creates the following GCP resources:
    - Terraform >= 1.6.0 ([install](https://www.terraform.io/downloads))
    - gcloud CLI ([install](https://cloud.google.com/sdk/docs/install))
    - kubectl ([install](https://kubernetes.io/docs/tasks/tools/))
+   - **gke-gcloud-auth-plugin** ([REQUIRED for GKE authentication](https://cloud.google.com/kubernetes-engine/docs/how-to/cluster-access-for-kubectl#install_plugin))
+     ```bash
+     # Install on Debian/Ubuntu
+     sudo apt-get install -y google-cloud-cli-gke-gcloud-auth-plugin
+
+     # Or using gcloud components (if available)
+     gcloud components install gke-gcloud-auth-plugin
+
+     # Verify installation
+     gke-gcloud-auth-plugin --version
+     ```
+     **Note**: This plugin is **mandatory** for Kubernetes 1.25+ clusters. Without it, kubectl cannot authenticate to GKE.
 
 ## Quick Start
 
