@@ -154,3 +154,63 @@ variable "labels" {
     application = "n8n"
   }
 }
+
+# ============================================================
+# Additional Cloud SQL Variables
+# ============================================================
+
+variable "cloudsql_database_version" {
+  description = "Cloud SQL PostgreSQL version"
+  type        = string
+  default     = "POSTGRES_15"
+
+  validation {
+    condition     = can(regex("^POSTGRES_(13|14|15|16)$", var.cloudsql_database_version))
+    error_message = "Database version must be POSTGRES_13, POSTGRES_14, POSTGRES_15, or POSTGRES_16."
+  }
+}
+
+variable "cloudsql_availability_type" {
+  description = "Cloud SQL availability type (ZONAL or REGIONAL for HA)"
+  type        = string
+  default     = "ZONAL"
+
+  validation {
+    condition     = contains(["ZONAL", "REGIONAL"], var.cloudsql_availability_type)
+    error_message = "Availability type must be ZONAL or REGIONAL."
+  }
+}
+
+variable "cloudsql_disk_size" {
+  description = "Cloud SQL disk size in GB"
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.cloudsql_disk_size >= 10 && var.cloudsql_disk_size <= 65536
+    error_message = "Disk size must be between 10 and 65536 GB."
+  }
+}
+
+variable "cloudsql_username" {
+  description = "Cloud SQL database username"
+  type        = string
+  default     = "n8n"
+
+  validation {
+    condition     = length(var.cloudsql_username) > 0 && length(var.cloudsql_username) <= 63
+    error_message = "Username must be between 1 and 63 characters."
+  }
+}
+
+variable "cloudsql_password" {
+  description = "Cloud SQL database password (only used if database_type=cloudsql)"
+  type        = string
+  default     = ""
+  sensitive   = true
+
+  validation {
+    condition     = var.cloudsql_password == "" || length(var.cloudsql_password) >= 8
+    error_message = "Password must be at least 8 characters if provided."
+  }
+}
