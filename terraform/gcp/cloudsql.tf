@@ -99,11 +99,16 @@ resource "google_compute_global_address" "private_ip_address" {
 }
 
 # Create private VPC connection for Cloud SQL
+# NOTE: This must be deleted AFTER Cloud SQL instance is fully removed
+# If destroy fails with "Producer services still using this connection",
+# manually delete Cloud SQL first: gcloud sql instances delete <instance-name>
 resource "google_service_networking_connection" "private_vpc_connection" {
   count                   = var.database_type == "cloudsql" ? 1 : 0
   network                 = google_compute_network.vpc.id
   service                 = "servicenetworking.googleapis.com"
   reserved_peering_ranges = [google_compute_global_address.private_ip_address[0].name]
+
+  deletion_policy         = "ABANDON"  # Don't fail destroy if connection still in use
 
   depends_on = [google_compute_global_address.private_ip_address]
 }
