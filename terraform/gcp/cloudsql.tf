@@ -112,6 +112,14 @@ resource "google_service_networking_connection" "private_vpc_connection" {
 # Database and User
 # ============================================================
 
+# Generate secure random password for Cloud SQL
+resource "random_password" "cloudsql_password" {
+  count            = var.database_type == "cloudsql" ? 1 : 0
+  length           = 32
+  special          = true
+  override_special = "!#$%&*()-_=+[]{}<>:?"
+}
+
 # Create n8n database
 resource "google_sql_database" "n8n" {
   count     = var.database_type == "cloudsql" ? 1 : 0
@@ -124,14 +132,13 @@ resource "google_sql_database" "n8n" {
   depends_on = [google_sql_database_instance.postgres]
 }
 
-# Create n8n database user
-# Note: Password should be provided via terraform.tfvars for security
+# Create n8n database user with auto-generated password
 resource "google_sql_user" "n8n" {
   count    = var.database_type == "cloudsql" ? 1 : 0
   name     = var.cloudsql_username
   instance = google_sql_database_instance.postgres[0].name
   project  = var.gcp_project_id
-  password = var.cloudsql_password
+  password = random_password.cloudsql_password[0].result
 
   depends_on = [google_sql_database_instance.postgres]
 }

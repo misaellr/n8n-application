@@ -202,6 +202,12 @@ output "cloudsql_username" {
   value       = var.database_type == "cloudsql" ? var.cloudsql_username : null
 }
 
+output "cloudsql_password" {
+  description = "Auto-generated database password for Cloud SQL (null if using sqlite)"
+  value       = var.database_type == "cloudsql" ? random_password.cloudsql_password[0].result : null
+  sensitive   = true
+}
+
 # ============================================================
 # kubectl Configuration Command
 # ============================================================
