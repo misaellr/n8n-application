@@ -2520,8 +2520,15 @@ class HelmRunner:
 
         if success:
             print(f"{Colors.OKGREEN}✓ n8n deployed successfully{Colors.ENDC}")
-            if db_config and db_config.get('database_type') == 'postgresql':
-                print(f"{Colors.OKGREEN}  Using PostgreSQL database at {db_config.get('rds_address')}{Colors.ENDC}")
+            # Check database configuration and display appropriate message
+            if db_config and db_config.get('database_type') in ['postgresql', 'cloudsql']:
+                db_type = db_config.get('database_type')
+                if db_type == 'cloudsql':
+                    db_host = db_config.get('cloudsql_private_ip', '')
+                    print(f"{Colors.OKGREEN}  Using Cloud SQL PostgreSQL at {db_host}{Colors.ENDC}")
+                else:  # postgresql (AWS RDS)
+                    db_host = db_config.get('rds_address', '')
+                    print(f"{Colors.OKGREEN}  Using RDS PostgreSQL at {db_host}{Colors.ENDC}")
             else:
                 print(f"{Colors.OKGREEN}  Using SQLite database (file-based){Colors.ENDC}")
 
