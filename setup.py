@@ -299,6 +299,80 @@ class AzureDeploymentConfig:
             'enable_basic_auth': self.enable_basic_auth,
         }
 
+class GCPDeploymentConfig:
+    """Stores all configuration for GCP GKE deployment
+
+    Maps to AWS/Azure equivalents:
+    - gcp_project_id      → aws_profile / azure_subscription_id
+    - gcp_region + zone   → aws_region / azure_location
+    - cluster_name        → eks_cluster_name / cluster_name
+    - node_machine_type   → node_instance_type / node_vm_size
+    - database_type       → RDS / Azure PostgreSQL / Cloud SQL
+    """
+    def __init__(self):
+        self.cloud_provider: str = "gcp"
+
+        # GCP-specific settings
+        self.gcp_project_id: str = ""
+        self.gcp_region: str = "us-central1"
+        self.gcp_zone: str = "us-central1-a"
+
+        # Cluster settings
+        self.cluster_name: str = "n8n-gke-cluster"
+        self.node_machine_type: str = "e2-medium"
+        self.node_count: int = 1
+
+        # Network settings
+        self.vpc_name: str = "n8n-vpc"
+        self.subnet_name: str = "n8n-subnet"
+
+        # Database settings (matches AWS/Azure pattern)
+        self.database_type: str = "sqlite"  # "sqlite" or "cloudsql"
+        self.cloudsql_instance_name: str = ""
+        self.cloudsql_tier: str = "db-f1-micro"
+
+        # Application settings
+        self.n8n_namespace: str = "n8n"
+        self.n8n_host: str = ""
+        self.n8n_protocol: str = "http"
+        self.n8n_encryption_key: str = ""
+
+        # TLS settings (matches AWS/Azure pattern)
+        self.enable_tls: bool = False
+        self.tls_provider: str = "letsencrypt"  # "letsencrypt" or "custom"
+        self.letsencrypt_email: str = ""
+
+        # Basic auth settings (matches AWS/Azure pattern)
+        self.enable_basic_auth: bool = False
+        self.basic_auth_username: str = "admin"
+        self.basic_auth_password: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize configuration to dictionary for JSON export"""
+        return {
+            'cloud_provider': self.cloud_provider,
+            'gcp_project_id': self.gcp_project_id,
+            'gcp_region': self.gcp_region,
+            'gcp_zone': self.gcp_zone,
+            'cluster_name': self.cluster_name,
+            'node_machine_type': self.node_machine_type,
+            'node_count': self.node_count,
+            'vpc_name': self.vpc_name,
+            'subnet_name': self.subnet_name,
+            'database_type': self.database_type,
+            'cloudsql_instance_name': self.cloudsql_instance_name,
+            'cloudsql_tier': self.cloudsql_tier,
+            'n8n_namespace': self.n8n_namespace,
+            'n8n_host': self.n8n_host,
+            'n8n_protocol': self.n8n_protocol,
+            'n8n_encryption_key': self.n8n_encryption_key,
+            'enable_tls': self.enable_tls,
+            'tls_provider': self.tls_provider,
+            'letsencrypt_email': self.letsencrypt_email,
+            'enable_basic_auth': self.enable_basic_auth,
+            'basic_auth_username': self.basic_auth_username,
+        }
+
 class DependencyChecker:
     """Checks for required CLI tools for deployment"""
 
@@ -1458,12 +1532,12 @@ class FileUpdater:
             raise
 
 
-def load_existing_configuration(script_dir: Path) -> DeploymentConfig:
-    """Load deployment values from terraform/aws/terraform.tfvars"""
-    tfvars_path = script_dir / "terraform" / "aws" / "terraform.tfvars"
+def load_existing_configuration(script_dir: Path, cloud_provider: str = "aws") -> DeploymentConfig:
+    """Load deployment values from terraform/{cloud_provider}/terraform.tfvars"""
+    tfvars_path = script_dir / "terraform" / cloud_provider / "terraform.tfvars"
 
     if not tfvars_path.exists():
-        raise FileNotFoundError("terraform/aws/terraform.tfvars not found; run initial setup first")
+        raise FileNotFoundError(f"terraform/{cloud_provider}/terraform.tfvars not found; run initial setup first")
 
     config = DeploymentConfig()
 
@@ -1977,13 +2051,14 @@ def get_loadbalancer_url(max_attempts: int = 30, delay: int = 10) -> Optional[st
         delay: Delay in seconds between attempts
 
     Returns:
-        LoadBalancer DNS name or None if not found
+        LoadBalancer DNS name or IP address, or None if not found
     """
     print(f"\n{Colors.HEADER}⏳ Waiting for LoadBalancer to be ready...{Colors.ENDC}")
 
     for attempt in range(1, max_attempts + 1):
         try:
-            result = subprocess.run(
+            # Try hostname first (AWS ELB)
+            result_hostname = subprocess.run(
                 ['kubectl', 'get', 'svc', '-n', 'ingress-nginx', 'ingress-nginx-controller',
                  '-o', 'jsonpath={.status.loadBalancer.ingress[0].hostname}'],
                 capture_output=True,
@@ -1991,8 +2066,22 @@ def get_loadbalancer_url(max_attempts: int = 30, delay: int = 10) -> Optional[st
                 timeout=10
             )
 
-            if result.returncode == 0 and result.stdout.strip():
-                lb_url = result.stdout.strip()
+            if result_hostname.returncode == 0 and result_hostname.stdout.strip():
+                lb_url = result_hostname.stdout.strip()
+                print(f"{Colors.OKGREEN}✓ LoadBalancer ready: {lb_url}{Colors.ENDC}")
+                return lb_url
+
+            # Try IP address (Azure, GCP)
+            result_ip = subprocess.run(
+                ['kubectl', 'get', 'svc', '-n', 'ingress-nginx', 'ingress-nginx-controller',
+                 '-o', 'jsonpath={.status.loadBalancer.ingress[0].ip}'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            if result_ip.returncode == 0 and result_ip.stdout.strip():
+                lb_url = result_ip.stdout.strip()
                 print(f"{Colors.OKGREEN}✓ LoadBalancer ready: {lb_url}{Colors.ENDC}")
                 return lb_url
 
@@ -3745,11 +3834,26 @@ WORKFLOW:
 
         if args.configure_tls:
             try:
-                config = load_existing_configuration(script_dir)
+                config = load_existing_configuration(script_dir, cloud_provider)
             except Exception as e:
                 print(f"{Colors.FAIL}✗ Unable to load existing configuration: {e}{Colors.ENDC}")
                 print("Run the full deployment once before using --configure-tls.")
                 sys.exit(1)
+
+            # Configure kubectl from terraform outputs
+            tf_runner = TerraformRunner(script_dir / "terraform" / cloud_provider)
+            outputs = tf_runner.get_outputs()
+
+            if outputs and 'configure_kubectl' in outputs:
+                print(f"\n{Colors.HEADER}🔧 Configuring kubectl...{Colors.ENDC}")
+                kubectl_cmd = outputs['configure_kubectl']
+                result = subprocess.run(kubectl_cmd, shell=True, capture_output=True, text=True)
+
+                if result.returncode == 0:
+                    print(f"{Colors.OKGREEN}✓ kubectl configured{Colors.ENDC}")
+                else:
+                    print(f"{Colors.WARNING}⚠  kubectl configuration failed. Run manually:{Colors.ENDC}")
+                    print(f"  {Colors.OKCYAN}{kubectl_cmd}{Colors.ENDC}")
 
             loadbalancer_url = get_loadbalancer_url(max_attempts=30, delay=10)
             if not loadbalancer_url:
@@ -3766,17 +3870,17 @@ WORKFLOW:
             print(f"{Colors.OKCYAN}Assuming infrastructure is already deployed...{Colors.ENDC}\n")
 
             try:
-                config = load_existing_configuration(script_dir)
+                config = load_existing_configuration(script_dir, cloud_provider)
                 print(f"{Colors.OKGREEN}✓ Loaded configuration from terraform.tfvars{Colors.ENDC}")
             except Exception as e:
                 print(f"{Colors.FAIL}✗ Unable to load existing configuration: {e}{Colors.ENDC}")
                 print("Run the full deployment once before using --skip-terraform.")
                 sys.exit(1)
 
-            tf_runner = TerraformRunner(script_dir / "terraform" / "aws")
+            tf_runner = TerraformRunner(script_dir / "terraform" / cloud_provider)
 
             # Verify Terraform state exists
-            tfstate_path = script_dir / "terraform" / "aws" / "terraform.tfstate"
+            tfstate_path = script_dir / "terraform" / cloud_provider / "terraform.tfstate"
             if not tfstate_path.exists():
                 print(f"{Colors.FAIL}✗ Terraform state not found{Colors.ENDC}")
                 print("Infrastructure must be deployed first. Run without --skip-terraform.")
